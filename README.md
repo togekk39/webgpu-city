@@ -73,10 +73,23 @@ cargo check --target wasm32-unknown-unknown
 
 ## Docker 開發
 
-Docker 設定保留為開發環境輔助用途；Web 版主要建議直接使用 Trunk 啟動：
+Docker Compose 會建置包含 `wasm32-unknown-unknown` target 與 Trunk 的開發映像，並在容器中啟動 Web 開發伺服器：
+
+```bash
+docker compose up --build dev
+```
+
+預設會將容器內的 Trunk `8080` port 對應到主機的 `8080` port，開啟 <http://localhost:8080/> 即可瀏覽。若要改用其他主機 port：
+
+```bash
+TRUNK_PORT=3000 docker compose up --build dev
+```
+
+若只想在相同容器環境確認編譯：
 
 ```bash
 docker compose run --rm dev cargo check
+docker compose run --rm dev cargo check --target wasm32-unknown-unknown
 ```
 
 ## 授權
