@@ -1,0 +1,23 @@
+FROM rust:1-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libegl1-mesa-dev \
+        libgl1-mesa-dev \
+        libvulkan1 \
+        mesa-vulkan-drivers \
+        pkg-config \
+        vulkan-tools \
+        libwayland-dev \
+        libx11-dev \
+        libxcursor-dev \
+        libxi-dev \
+        libxinerama-dev \
+        libxkbcommon-dev \
+        libxrandr-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace/webgpu-city
+
+ENV CARGO_TARGET_DIR=/workspace/webgpu-city/target
