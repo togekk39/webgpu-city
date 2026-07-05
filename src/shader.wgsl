@@ -90,17 +90,20 @@ fn sky_color_for_dir(dir: vec3<f32>) -> vec3<f32> {
     let mu = clamp(dot(d, sun), -1.0, 1.0);
     let up = clamp(d.y * 0.5 + 0.5, 0.0, 1.0);
     let haze = uniforms.sunset.w;
-    let zenith = uniforms.sky_color.rgb * (0.86 + 0.22 * (1.0 - haze * 0.2));
-    let horizon = uniforms.horizon_color.rgb * (0.62 + haze * 0.22);
-    var sky = mix(horizon, zenith, pow(up, 0.62));
-    let horizon_glow = exp(-max(d.y, 0.0) * 7.5) * (0.45 + haze * 0.20);
+    let zenith = uniforms.sky_color.rgb * (0.78 + 0.18 * (1.0 - haze * 0.2));
+    let horizon = uniforms.horizon_color.rgb * (0.70 + haze * 0.26);
+    var sky = mix(horizon, zenith, pow(up, 0.58));
+    let horizon_glow = exp(-max(d.y, 0.0) * 6.2) * (0.58 + haze * 0.28);
+    let dusty_band = exp(-abs(d.y) * 13.0) * (0.22 + haze * 0.18);
     sky += uniforms.horizon_color.rgb * horizon_glow;
-    let forward = pow(max(mu, 0.0), mix(18.0, 8.0, clamp(haze - 0.8, 0.0, 1.0))) * (0.55 + haze * 0.45);
-    let corona = pow(max(mu, 0.0), 90.0) * 2.8;
-    let disc = smoothstep(cos(uniforms.sunset.z * 1.15), cos(uniforms.sunset.z * 0.72), mu);
-    sky += uniforms.sun_color.rgb * (forward + corona);
-    sky += uniforms.sun_color.rgb * disc * 24.0;
-    return sky * 1.12;
+    sky += mix(vec3<f32>(0.22, 0.18, 0.30), uniforms.sun_color.rgb, 0.55) * dusty_band;
+    let forward = pow(max(mu, 0.0), mix(16.0, 6.0, clamp(haze - 0.8, 0.0, 1.0))) * (0.70 + haze * 0.52);
+    let aureole = pow(max(mu, 0.0), 42.0) * 2.0;
+    let hot_core = pow(max(mu, 0.0), 360.0) * 10.0;
+    let soft_disc = smoothstep(cos(uniforms.sunset.z * 2.3), cos(uniforms.sunset.z * 0.45), mu);
+    // Keep the sun an atmospheric glowing source rather than a hard flat disk.
+    sky += uniforms.sun_color.rgb * (forward + aureole + hot_core + soft_disc * 7.0);
+    return sky * 1.14;
 }
 
 fn sample_shadow(world_pos: vec3<f32>, normal: vec3<f32>, sun: vec3<f32>) -> f32 {
@@ -201,8 +204,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let reflection = sky_color_for_dir(reflect(-v, n)) * (m.y * 0.22 + fresnel * m.y * 0.75);
     let sky_ambient = uniforms.ambient_color.rgb * (0.48 + 0.52 * max(n.y, 0.0));
     let cool_bounce = vec3<f32>(0.045, 0.060, 0.115) * (1.0 - diffuse) * (0.65 + 0.35 * max(n.y, 0.0));
+    let backlit = smoothstep(0.18, 0.92, dot(-n, sun)) * pow(1.0 - max(dot(n, v), 0.0), 2.2);
+    let silhouette_edge = smoothstep(0.10, 0.82, 1.0 - abs(dot(n, v)));
+    let rim_shadow_gate = mix(0.55, 1.0, shadow);
+    let rim = backlit * silhouette_edge * rim_shadow_gate;
     let direct = uniforms.sun_color.rgb * diffuse * direct_shadow * (1.48 - m.x * 0.34);
-    var color = base * (sky_ambient + cool_bounce + direct) + reflection + uniforms.sun_color.rgb * spec;
+    var color = base * (sky_ambient + cool_bounce + direct) + reflection + uniforms.sun_color.rgb * (spec + rim * 1.05);
 
     if (m.w > 0.5) { color += base * m.z * 0.58; }
     if (input.material_id < 0.5) {
@@ -211,13 +218,18 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         color *= 0.82 + 0.18 * hash21(input.world_position.xz * 8.0);
     }
 
-    let height_fog = clamp(1.15 - input.world_position.y / 18.0, 0.12, 1.0);
-    let depth_bias = smoothstep(20.0, 105.0, dist);
+    let height_fog = clamp(1.25 - input.world_position.y / 16.0, 0.16, 1.0);
+    let depth_bias = smoothstep(14.0, 112.0, dist);
     let view_dir = normalize(input.world_position - uniforms.camera_position.xyz);
-    let sun_view = pow(max(dot(view_dir, sun), 0.0), 8.0);
-    let fog = (1.0 - exp(-dist * uniforms.settings.z * 0.55 * height_fog)) * depth_bias;
-    let warm_haze = mix(sky_color_for_dir(view_dir), uniforms.horizon_color.rgb * 0.55 + uniforms.sun_color.rgb * (0.25 + sun_view * 0.55), 0.45);
-    color = mix(color, warm_haze, clamp(fog, 0.0, 0.72));
+    let sun_view = pow(max(dot(view_dir, sun), 0.0), 7.0);
+    let canyon_dust = smoothstep(2.0, 24.0, input.world_position.y) * smoothstep(120.0, 28.0, dist);
+    let humid_noise = 0.86 + 0.20 * fbm(input.world_position.xz * 0.055 + uniforms.settings.xx * 0.006);
+    let aerial = (1.0 - exp(-dist * uniforms.settings.z * 0.72 * height_fog * humid_noise)) * depth_bias;
+    let horizon_fog = smoothstep(-0.08, 0.16, view_dir.y) * smoothstep(0.42, -0.06, view_dir.y);
+    let fog = clamp(aerial + horizon_fog * 0.16 + canyon_dust * 0.035, 0.0, 0.82);
+    let cool_distant_shadow = vec3<f32>(0.12, 0.14, 0.25);
+    let warm_haze = mix(cool_distant_shadow, uniforms.horizon_color.rgb * 0.58 + uniforms.sun_color.rgb * (0.28 + sun_view * 0.72), 0.62);
+    color = mix(color, warm_haze, fog);
     return vec4<f32>(color, 1.0);
 }
 
@@ -257,14 +269,83 @@ fn fs_post(input: FullOut) -> @location(0) vec4<f32> {
     let texel = 1.0 / dims;
     let scene_uv = vec2<f32>(input.uv.x, 1.0 - input.uv.y);
     var color = textureSample(hdr_scene, hdr_sampler, scene_uv).rgb;
+
+    let ndc = vec4<f32>(input.uv * 2.0 - vec2<f32>(1.0), 1.0, 1.0);
+    let world = uniforms.inv_view_proj * ndc;
+    let view_dir = normalize(world.xyz / world.w - uniforms.camera_position.xyz);
+    let sun = normalize(uniforms.sun_direction.xyz);
+    let sun_clip = uniforms.view_proj * vec4<f32>(uniforms.camera_position.xyz + sun * 200.0, 1.0);
+    let sun_ndc = sun_clip.xy / max(sun_clip.w, 0.0001);
+    let sun_uv = sun_ndc * 0.5 + vec2<f32>(0.5);
+    let sun_on_screen = step(0.0, sun_clip.w) * step(-0.08, sun_uv.x) * step(sun_uv.x, 1.08) * step(-0.08, sun_uv.y) * step(sun_uv.y, 1.08);
+    let look_sun = smoothstep(0.950, 0.998, dot(view_dir, sun));
+    let sun_scene_uv = vec2<f32>(sun_uv.x, 1.0 - sun_uv.y);
+
+    var source_peak = 0.0;
+    var source_dark = 0.0;
+    for (var sx: i32 = -2; sx <= 2; sx = sx + 1) {
+        for (var sy: i32 = -2; sy <= 2; sy = sy + 1) {
+            let tap_uv = sun_scene_uv + vec2<f32>(f32(sx), f32(sy)) * texel * 5.0;
+            let tap_luma = dot(textureSample(hdr_scene, hdr_sampler, tap_uv).rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            source_peak = max(source_peak, tap_luma);
+            source_dark += (1.0 - smoothstep(0.18, 1.20, tap_luma)) / 25.0;
+        }
+    }
+    let source_contrast = smoothstep(0.10, 0.68, source_dark) * smoothstep(1.25, 5.5, source_peak);
+    let visible_source = sun_on_screen * smoothstep(1.15, 6.5, source_peak) * (0.45 + source_contrast * 0.85);
+
+    let to_sun = sun_scene_uv - scene_uv;
+    let ray_len = length(to_sun);
+    let ray_dir = to_sun / max(ray_len, 0.0001);
+    let tangent = vec2<f32>(-ray_dir.y, ray_dir.x);
+    let dither = hash21(floor(input.uv * dims) + vec2<f32>(uniforms.settings.x * 23.17, uniforms.settings.x * 9.31));
+    var shafts = vec3<f32>(0.0);
+    var transmittance = 1.0;
+    var edge_energy = 0.0;
+    var weight_sum = 0.0;
+    for (var i: i32 = 0; i < 48; i = i + 1) {
+        let fi = f32(i);
+        let t = (fi + 0.35 + dither * 0.55) / 48.0;
+        let falloff = pow(1.0 - t, 1.45);
+        let width = mix(0.65, 3.20, t) * texel * (1.0 + ray_len * 1.4);
+        let base_uv = scene_uv + to_sun * t;
+        let tap_a = textureSample(hdr_scene, hdr_sampler, base_uv).rgb;
+        let tap_b = textureSample(hdr_scene, hdr_sampler, base_uv + tangent * width).rgb;
+        let tap_c = textureSample(hdr_scene, hdr_sampler, base_uv - tangent * width).rgb;
+        let luma_a = dot(tap_a, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let luma_b = dot(tap_b, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let luma_c = dot(tap_c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let beam_luma = max(max(luma_a, luma_b), luma_c);
+        let local_min = min(min(luma_a, luma_b), luma_c);
+        let local_edge = smoothstep(0.20, 2.35, beam_luma - local_min);
+        let blocker = 1.0 - smoothstep(0.12, 0.72, (luma_a + luma_b + luma_c) * 0.3333);
+        transmittance *= mix(0.985, 0.900, blocker * (1.0 - t * 0.55));
+        let bright = max(beam_luma - 0.92, 0.0);
+        shafts += uniforms.sun_color.rgb * bright * transmittance * falloff * (0.012 + local_edge * 0.020);
+        edge_energy += local_edge * falloff;
+        weight_sum += falloff;
+    }
+    shafts /= max(weight_sum * 0.23, 0.0001);
+    let radial = 1.0 - smoothstep(0.04, 0.86, distance(input.uv, sun_uv));
+    let partial_occlusion = smoothstep(0.09, 0.70, edge_energy / max(weight_sum, 0.0001)) * smoothstep(0.98, 0.18, transmittance);
+    color += shafts * visible_source * radial * (0.26 + partial_occlusion * 1.65);
+    color += uniforms.sun_color.rgb * look_sun * visible_source * 0.16;
+
+    let flare_axis = input.uv - 0.5;
+    let sun_axis = sun_uv - 0.5;
+    let ghost1 = 1.0 - smoothstep(0.00, 0.052, distance(flare_axis, -sun_axis * 0.42));
+    let ghost2 = 1.0 - smoothstep(0.00, 0.032, distance(flare_axis, -sun_axis * 0.82));
+    let anamorphic = exp(-abs(input.uv.y - sun_uv.y) * 94.0) * smoothstep(0.70, 0.0, abs(input.uv.x - sun_uv.x));
+    color += (uniforms.sun_color.rgb * ghost1 * 0.026 + vec3<f32>(0.45,0.58,1.0) * ghost2 * 0.014 + uniforms.sun_color.rgb * anamorphic * 0.014) * visible_source;
+
     var bloom = vec3<f32>(0.0);
     for (var x: i32 = -2; x <= 2; x = x + 1) {
         for (var y: i32 = -2; y <= 2; y = y + 1) {
             let s = textureSample(hdr_scene, hdr_sampler, scene_uv + vec2<f32>(f32(x), f32(y)) * texel * 2.0).rgb;
-            bloom += max(s - vec3<f32>(1.15), vec3<f32>(0.0)) / 25.0;
+            bloom += max(s - vec3<f32>(1.75), vec3<f32>(0.0)) / 25.0;
         }
     }
-    color += bloom * 0.16 * uniforms.settings.w;
+    color += bloom * 0.24 * uniforms.settings.w;
     color *= uniforms.settings.y * 1.03;
     let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
     color = mix(color * vec3<f32>(0.88, 0.94, 1.06), color * vec3<f32>(1.08, 0.98, 0.88), smoothstep(0.35, 1.8, luma));
