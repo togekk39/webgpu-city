@@ -1,5 +1,5 @@
 use cgmath::{Deg, Matrix4, Point3, SquareMatrix, Vector3, perspective};
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -148,7 +148,7 @@ enum RenderOutcome {
 }
 
 struct State {
-    window: &'static Window,
+    window: Arc<Window>,
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -164,11 +164,11 @@ struct State {
 }
 
 impl State {
-    async fn new(window: &'static Window) -> Self {
+    async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance
-            .create_surface(window)
+            .create_surface(window.clone())
             .expect("create window surface");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -430,11 +430,17 @@ struct App {
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.state.is_some() {
+            return;
+        }
+
         let attrs = Window::default_attributes().with_title("Rust wgpu 3D City");
-        let window = Box::leak(Box::new(
-            event_loop.create_window(attrs).expect("create window"),
-        ));
+        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         self.state = Some(pollster::block_on(State::new(window)));
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.state = None;
     }
 
     fn window_event(
