@@ -39,6 +39,29 @@ fn hash21(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(127.1, 311.7))) * 43758.5453);
 }
 
+fn value_noise(p: vec2<f32>) -> f32 {
+    let i = floor(p);
+    let f = fract(p);
+    let u = f * f * (3.0 - 2.0 * f);
+    let a = hash21(i);
+    let b = hash21(i + vec2<f32>(1.0, 0.0));
+    let c = hash21(i + vec2<f32>(0.0, 1.0));
+    let d = hash21(i + vec2<f32>(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn fbm(p: vec2<f32>) -> f32 {
+    var v = 0.0;
+    var amp = 0.5;
+    var q = p;
+    for (var i: i32 = 0; i < 4; i = i + 1) {
+        v += value_noise(q) * amp;
+        q *= 2.03;
+        amp *= 0.5;
+    }
+    return v;
+}
+
 fn material_response(id: f32) -> vec4<f32> {
     if (id < 0.5) { return vec4<f32>(0.72, 0.10, 0.00, 0.0); }      // asphalt rough, wet sheen
     if (id < 1.5) { return vec4<f32>(0.88, 0.04, 0.00, 0.0); }      // concrete
@@ -79,9 +102,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let m = material_response(input.material_id);
     var base = input.color;
 
-    let facade_noise = hash21(floor(input.world_position.xz * 2.2) + floor(input.uv * 7.0));
-    base *= 0.88 + facade_noise * 0.22;
-    let grime = smoothstep(5.5, 0.0, input.world_position.y) * (0.08 + 0.12 * hash21(input.world_position.xz));
+    let fine_noise = fbm(input.world_position.xz * 0.65 + input.uv * 0.35);
+    base *= 0.94 + fine_noise * 0.10;
+    let rain = fbm(vec2<f32>(input.world_position.x * 1.8 + input.world_position.z * 0.25, input.world_position.y * 0.13));
+    let streaks = smoothstep(0.48, 0.86, rain) * smoothstep(14.0, 1.0, input.world_position.y);
+    let grime = streaks * 0.10;
     if (input.material_id > 0.5 && input.material_id < 3.5) { base *= 1.0 - grime; }
 
     if (input.material_id > 2.5 && input.material_id < 3.5) {
@@ -110,10 +135,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let dist = length(input.world_position - uniforms.camera_position.xyz);
-    let height_fog = clamp(1.0 - input.world_position.y / 18.0, 0.15, 1.0);
-    let fog = 1.0 - exp(-dist * uniforms.settings.z * height_fog);
+    let height_fog = clamp(1.0 - input.world_position.y / 24.0, 0.08, 0.85);
+    let depth_bias = smoothstep(18.0, 80.0, dist);
+    let fog = (1.0 - exp(-dist * uniforms.settings.z * 0.52 * height_fog)) * depth_bias;
     let view_dir = normalize(input.world_position - uniforms.camera_position.xyz);
-    color = mix(color, sky_color_for_dir(view_dir), clamp(fog, 0.0, 0.82));
+    let warm_haze = mix(sky_color_for_dir(view_dir), uniforms.sun_color.rgb * 0.58 + vec3<f32>(0.25, 0.18, 0.13), 0.32);
+    color = mix(color, warm_haze, clamp(fog, 0.0, 0.62));
     return vec4<f32>(color, 1.0);
 }
 
@@ -140,8 +167,9 @@ fn fs_sky(input: FullOut) -> @location(0) vec4<f32> {
     let dir = normalize(world.xyz / world.w - uniforms.camera_position.xyz);
     var color = sky_color_for_dir(dir);
     let cloud_band = smoothstep(0.02, 0.22, dir.y) * (1.0 - smoothstep(0.42, 0.82, dir.y));
-    let cloud_noise = hash21(floor((dir.xz / max(dir.y + 0.18, 0.06)) * 18.0 + uniforms.settings.xx * 0.015));
-    let cloud = cloud_band * smoothstep(0.52, 0.82, cloud_noise) * 0.22;
+    let cloud_p = (dir.xz / max(dir.y + 0.18, 0.06)) * 2.6 + uniforms.settings.xx * 0.012;
+    let cloud_noise = fbm(cloud_p);
+    let cloud = cloud_band * smoothstep(0.48, 0.76, cloud_noise) * 0.16;
     color = mix(color, uniforms.sun_color.rgb * 0.85 + vec3<f32>(0.35, 0.19, 0.14), cloud);
     return vec4<f32>(color, 1.0);
 }
@@ -165,7 +193,7 @@ fn fs_post(input: FullOut) -> @location(0) vec4<f32> {
     color = mix(color * vec3<f32>(0.88, 0.94, 1.06), color * vec3<f32>(1.08, 0.98, 0.88), smoothstep(0.35, 1.8, luma));
     let d = distance(input.uv, vec2<f32>(0.5));
     color *= 1.0 - smoothstep(0.42, 0.82, d) * 0.20;
-    color += (hash21(input.uv * dims + uniforms.settings.xx) - 0.5) * 0.012;
+    color += (hash21(input.uv * dims + uniforms.settings.xx) - 0.5) * 0.004;
     color = aces_tonemap(color);
     color = pow(color, vec3<f32>(1.0 / 2.2));
     return vec4<f32>(color, 1.0);
