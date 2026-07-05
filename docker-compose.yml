@@ -5,11 +5,11 @@ services:
       dockerfile: Dockerfile.dev
     image: webgpu-city-dev
     working_dir: /workspace/webgpu-city
-    command: trunk serve --address 0.0.0.0 --port 8080
+    command: trunk serve --address 0.0.0.0 --port ${TRUNK_PORT:-8080}
     environment:
       RUST_BACKTRACE: "1"
     ports:
-      - "${TRUNK_PORT:-8080}:8080"
+      - "${TRUNK_PORT:-8080}:${TRUNK_PORT:-8080}"
     volumes:
       - .:/workspace/webgpu-city
       - cargo-registry:/usr/local/cargo/registry
