@@ -691,8 +691,14 @@ fn build_city_mesh() -> Mesh {
             false,
         );
     }
-    build_hero_building(&mut mesh, 35.0, -58.0, 8.0, 7.0, 48.0, 77, false);
-    mesh.add_box([35.0, 73.5, -58.0], [0.20, 3.5, 0.20], [1.0, 0.72, 0.35]);
+    let landmark_height = 48.0;
+    let spire_height = 3.5;
+    build_hero_building(&mut mesh, 35.0, -58.0, 8.0, 7.0, landmark_height, 77, false);
+    mesh.add_box(
+        [35.0, landmark_height + spire_height * 0.5, -58.0],
+        [0.20, spire_height, 0.20],
+        [1.0, 0.72, 0.35],
+    );
     // street lights, poles, wires, signs, cars, planters, bins
     for (i, z) in (-42..40).step_by(10).enumerate() {
         for x in [-7.2, 7.2, 13.3, 22.7] {
