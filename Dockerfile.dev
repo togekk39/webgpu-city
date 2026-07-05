@@ -15,6 +15,7 @@ RUN apt-get update \
         libxi-dev \
         libxinerama-dev \
         libxkbcommon-dev \
+        libxkbcommon-x11-0 \
         libxrandr-dev \
     && rm -rf /var/lib/apt/lists/*
 
