@@ -45,7 +45,7 @@ fn sync_canvas_to_viewport(window: &Window) -> PhysicalSize<u32> {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Vertex {
     position: [f32; 3],
-    color: [f32; 3],
+    color: [f32; 4],
 }
 
 impl Vertex {
@@ -62,7 +62,7 @@ impl Vertex {
                 wgpu::VertexAttribute {
                     offset: 12,
                     shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x3,
+                    format: wgpu::VertexFormat::Float32x4,
                 },
             ],
         }
@@ -74,13 +74,15 @@ impl Vertex {
 struct Uniforms {
     view_proj: [[f32; 4]; 4],
     light_dir: [f32; 4],
+    time_effects: [f32; 4],
 }
 
 impl Uniforms {
     fn new() -> Self {
         Self {
             view_proj: Matrix4::identity().into(),
-            light_dir: [0.45, 0.85, 0.25, 0.0],
+            light_dir: [-0.82, 0.28, 0.42, 0.0],
+            time_effects: [0.0, 1.0, 1.0, 1.0],
         }
     }
 }
@@ -99,6 +101,16 @@ impl Mesh {
     }
 
     fn add_box(&mut self, center: [f32; 3], size: [f32; 3], color: [f32; 3]) {
+        self.add_box_tagged(center, size, color, 0.0);
+    }
+
+    fn add_box_tagged(
+        &mut self,
+        center: [f32; 3],
+        size: [f32; 3],
+        color: [f32; 3],
+        material_tag: f32,
+    ) {
         let [cx, cy, cz] = center;
         let [sx, sy, sz] = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
         let base = self.vertices.len() as u32;
@@ -128,6 +140,7 @@ impl Mesh {
             [cx + sx, cy - sy, cz + sz],
             [cx - sx, cy - sy, cz + sz],
         ];
+        let color = [color[0], color[1], color[2], material_tag];
         self.vertices.extend(
             corners
                 .into_iter()
@@ -226,6 +239,8 @@ struct State {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
+    draw_calls: u32,
+    triangle_count: u32,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     depth: DepthTexture,
@@ -365,6 +380,8 @@ impl State {
             vertex_buffer,
             index_buffer,
             num_indices: mesh.indices.len() as u32,
+            draw_calls: 1,
+            triangle_count: mesh.indices.len() as u32 / 3,
             uniform_buffer,
             uniform_bind_group,
             depth,
@@ -385,9 +402,17 @@ impl State {
     fn update(&self) {
         let elapsed = self.clock.elapsed_secs();
         let uniforms = Uniforms {
-            view_proj: camera_matrix(self.config.width, self.config.height, elapsed * 0.18).into(),
-            light_dir: [0.45, 0.85, 0.25, 0.0],
+            view_proj: camera_matrix(self.config.width, self.config.height, elapsed * 0.035).into(),
+            light_dir: [-0.82, 0.28, 0.42, 0.0],
+            // x=time, y=fog, z=bloom/emissive lift, w=color grade toggle.
+            time_effects: [elapsed, 1.0, 1.0, 1.0],
         };
+        if (elapsed * 2.0) as u32 % 2 == 0 {
+            self.window.set_title(&format!(
+                "Rust wgpu Hero Block | {:.0} tris | {} draw | fog/bloom/colorgrade on",
+                self.triangle_count, self.draw_calls
+            ));
+        }
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
@@ -454,169 +479,398 @@ impl State {
 
 fn camera_matrix(width: u32, height: u32, angle: f32) -> Matrix4<f32> {
     let aspect = width as f32 / height as f32;
-    let eye = Point3::new(angle.sin() * 26.0, 15.0, angle.cos() * 26.0);
-    let view = Matrix4::look_at_rh(eye, Point3::new(0.0, 2.5, 0.0), Vector3::unit_y());
-    let proj = perspective(Deg(45.0), aspect, 0.1, 100.0);
+    let eye = Point3::new(-18.0 + angle.sin() * 3.0, 14.0, 31.0 + angle.cos() * 2.0);
+    let view = Matrix4::look_at_rh(eye, Point3::new(1.5, 3.0, -18.0), Vector3::unit_y());
+    let proj = perspective(Deg(52.0), aspect, 0.1, 160.0);
     proj * view
 }
 
-fn build_detailed_building(
-    mesh: &mut Mesh,
-    center: [f32; 3],
-    size: [f32; 3],
-    body_color: [f32; 3],
-    accent: [f32; 3],
-    seed: i32,
-) {
-    let [cx, _, cz] = center;
-    let [sx, height, sz] = size;
-    mesh.add_box([cx, height * 0.5, cz], [sx, height, sz], body_color);
+fn hash01(seed: i32) -> f32 {
+    let n = (seed as f32 * 12.9898).sin() * 43_758.547;
+    n.fract().abs()
+}
 
-    let floor_count = (height / 0.55).floor().max(2.0) as i32;
-    let window_color = [0.95, 0.74, 0.32];
-    let dark_glass = [0.035, 0.075, 0.12];
-    let trim = [
-        (body_color[0] + 0.18).min(0.75),
-        (body_color[1] + 0.18).min(0.78),
-        (body_color[2] + 0.18).min(0.82),
-    ];
-
-    for floor in 0..floor_count {
-        let y = 0.42 + floor as f32 * 0.55;
-        let lit = (floor + seed).rem_euclid(4) != 0;
-        let glass = if lit { window_color } else { dark_glass };
-        let window_h = 0.24;
-
-        for side in 0..4 {
-            let along = if side < 2 { sx } else { sz };
-            let slots = (along / 0.45).floor().max(2.0) as i32;
-            for slot in 0..slots {
-                if (slot + floor + seed + side).rem_euclid(5) == 0 {
-                    continue;
-                }
-                let offset = (slot as f32 + 0.5) / slots as f32 - 0.5;
-                let span = along * offset * 0.72;
-                match side {
-                    0 => mesh.add_box(
-                        [cx + span, y, cz + sz * 0.505],
-                        [0.20, window_h, 0.035],
-                        glass,
-                    ),
-                    1 => mesh.add_box(
-                        [cx + span, y, cz - sz * 0.505],
-                        [0.20, window_h, 0.035],
-                        glass,
-                    ),
-                    2 => mesh.add_box(
-                        [cx + sx * 0.505, y, cz + span],
-                        [0.035, window_h, 0.20],
-                        glass,
-                    ),
-                    _ => mesh.add_box(
-                        [cx - sx * 0.505, y, cz + span],
-                        [0.035, window_h, 0.20],
-                        glass,
-                    ),
-                }
+fn add_facade_details(mesh: &mut Mesh, cx: f32, cz: f32, sx: f32, height: f32, style: i32) {
+    let floors = (height / (1.05 + hash01(style) * 0.28)).floor().max(3.0) as i32;
+    let warm = [[1.0, 0.66, 0.30], [0.85, 0.48, 0.24], [0.55, 0.74, 0.95]];
+    let dark = [0.018, 0.026, 0.034];
+    let window_w = if style % 3 == 0 { 0.42 } else { 0.30 };
+    for floor in 0..floors {
+        let y = 0.85 + floor as f32 * (height - 1.4) / floors as f32;
+        let slots = (sx / (0.82 + hash01(style + floor) * 0.45))
+            .floor()
+            .max(3.0) as i32;
+        for slot in 0..slots {
+            let pattern = (slot * 13 + floor * 7 + style * 5).rem_euclid(11);
+            if pattern == 0 || pattern == 6 {
+                continue;
+            }
+            let lit = matches!(pattern, 1 | 3 | 8) || (floor < 2 && slot % 3 == 0);
+            let glass = if lit {
+                warm[(style as usize + slot as usize) % warm.len()]
+            } else {
+                dark
+            };
+            let x = cx + ((slot as f32 + 0.5) / slots as f32 - 0.5) * sx * 0.78;
+            mesh.add_box([x, y, cz + 2.03], [window_w, 0.46, 0.045], glass);
+            if floor % 4 == 1 && slot % 2 == 0 {
+                mesh.add_box(
+                    [x, y - 0.34, cz + 2.08],
+                    [window_w + 0.22, 0.05, 0.22],
+                    [0.16, 0.17, 0.16],
+                );
             }
         }
-
         if floor % 3 == 0 {
             mesh.add_box(
-                [cx, y + 0.22, cz + sz * 0.512],
-                [sx * 0.92, 0.035, 0.025],
-                trim,
-            );
-            mesh.add_box(
-                [cx, y + 0.22, cz - sz * 0.512],
-                [sx * 0.92, 0.035, 0.025],
-                trim,
-            );
-            mesh.add_box(
-                [cx + sx * 0.512, y + 0.22, cz],
-                [0.025, 0.035, sz * 0.92],
-                trim,
-            );
-            mesh.add_box(
-                [cx - sx * 0.512, y + 0.22, cz],
-                [0.025, 0.035, sz * 0.92],
-                trim,
+                [cx, y + 0.36, cz + 2.055],
+                [sx * 0.93, 0.04, 0.05],
+                [0.28, 0.25, 0.22],
             );
         }
     }
+    if style % 2 == 0 {
+        mesh.add_box(
+            [cx - sx * 0.42, height * 0.5, cz + 2.08],
+            [0.06, height * 0.82, 0.06],
+            [0.08, 0.085, 0.08],
+        );
+    }
+    mesh.add_box(
+        [cx, height + 0.08, cz],
+        [sx * 1.04, 0.16, 4.15],
+        [0.20, 0.20, 0.19],
+    );
+}
 
-    mesh.add_box([cx, height + 0.06, cz], [sx * 1.08, 0.12, sz * 1.08], trim);
+fn build_hero_building(
+    mesh: &mut Mesh,
+    cx: f32,
+    cz: f32,
+    sx: f32,
+    sz: f32,
+    height: f32,
+    style: i32,
+    shop: bool,
+) {
+    let palette = [
+        [0.31, 0.16, 0.10],
+        [0.22, 0.20, 0.18],
+        [0.38, 0.32, 0.25],
+        [0.18, 0.22, 0.26],
+        [0.28, 0.24, 0.20],
+        [0.13, 0.14, 0.15],
+        [0.44, 0.27, 0.17],
+        [0.24, 0.28, 0.29],
+        [0.34, 0.34, 0.31],
+        [0.20, 0.17, 0.14],
+    ];
+    let mut body = palette[style as usize % palette.len()];
+    let tint = hash01(style * 19) * 0.08 - 0.035;
+    body = [body[0] + tint, body[1] + tint * 0.6, body[2] + tint * 0.3];
+    mesh.add_box([cx, height * 0.5, cz], [sx, height, sz], body);
+    add_facade_details(mesh, cx, cz + sz * 0.5 - 2.0, sx, height, style);
+    if shop {
+        mesh.add_box(
+            [cx, 0.62, cz + sz * 0.52],
+            [sx * 0.86, 1.05, 0.10],
+            [0.055, 0.04, 0.035],
+        );
+        mesh.add_box(
+            [cx, 1.34, cz + sz * 0.55],
+            [sx * 0.72, 0.30, 0.14],
+            [0.95, 0.31 + hash01(style) * 0.25, 0.10],
+        );
+        mesh.add_box(
+            [cx - sx * 0.22, 0.62, cz + sz * 0.59],
+            [0.72, 0.78, 0.08],
+            [0.95, 0.62, 0.28],
+        );
+        mesh.add_box(
+            [cx + sx * 0.25, 0.62, cz + sz * 0.59],
+            [0.72, 0.78, 0.08],
+            [0.05, 0.08, 0.09],
+        );
+        mesh.add_box(
+            [cx, 1.78, cz + sz * 0.59],
+            [sx * 0.78, 0.14, 0.46],
+            [0.32, 0.05, 0.04],
+        );
+    }
+    // grime bands, leaks, AC boxes, pipes
     mesh.add_box(
-        [cx, height + 0.28, cz],
-        [sx * 0.62, 0.32, sz * 0.58],
-        accent,
+        [cx, 0.12, cz + sz * 0.525],
+        [sx * 0.92, 0.22, 0.05],
+        [0.055, 0.050, 0.044],
+    );
+    for i in 0..3 {
+        let x = cx + (hash01(style * 31 + i) - 0.5) * sx * 0.74;
+        mesh.add_box(
+            [x, height * (0.32 + i as f32 * 0.14), cz + sz * 0.535],
+            [0.08, height * 0.18, 0.04],
+            [0.06, 0.052, 0.045],
+        );
+    }
+    mesh.add_box(
+        [cx + sx * 0.32, height + 0.36, cz],
+        [0.56, 0.44, 0.72],
+        [0.25, 0.28, 0.28],
+    );
+    add_fire_escape(mesh, cx, cz + sz * 0.52, sx, height, style);
+    add_rooftop_clutter(mesh, cx, cz, sx, sz, height, style);
+}
+
+fn add_moving_car(mesh: &mut Mesh, x: f32, z: f32, tint: [f32; 3]) {
+    mesh.add_box_tagged([x, 0.38, z], [1.72, 0.46, 3.15], tint, 1.0);
+    mesh.add_box_tagged(
+        [x, 0.77, z - 0.18],
+        [1.18, 0.42, 1.34],
+        [0.035, 0.045, 0.055],
+        1.0,
+    );
+    mesh.add_box_tagged(
+        [x, 0.43, z - 1.68],
+        [1.12, 0.16, 0.08],
+        [0.95, 0.13, 0.06],
+        1.0,
+    );
+    mesh.add_box_tagged(
+        [x, 0.43, z + 1.68],
+        [1.05, 0.14, 0.08],
+        [1.0, 0.82, 0.42],
+        1.0,
+    );
+}
+
+fn add_pedestrian(mesh: &mut Mesh, x: f32, z: f32, coat: [f32; 3]) {
+    mesh.add_box_tagged([x, 0.72, z], [0.20, 0.82, 0.16], coat, 2.0);
+    mesh.add_box_tagged([x, 1.22, z], [0.18, 0.18, 0.18], [0.55, 0.38, 0.28], 2.0);
+}
+
+fn add_fire_escape(mesh: &mut Mesh, cx: f32, cz: f32, sx: f32, height: f32, style: i32) {
+    if style % 3 != 1 {
+        return;
+    }
+    let x = cx - sx * 0.33;
+    for level in 0..4 {
+        let y = 2.4 + level as f32 * (height / 5.4).max(1.8);
+        mesh.add_box([x, y, cz], [1.35, 0.07, 0.55], [0.035, 0.037, 0.036]);
+        mesh.add_box(
+            [x - 0.62, y + 0.24, cz],
+            [0.05, 0.48, 0.06],
+            [0.04, 0.04, 0.038],
+        );
+        mesh.add_box(
+            [x + 0.62, y + 0.24, cz],
+            [0.05, 0.48, 0.06],
+            [0.04, 0.04, 0.038],
+        );
+        mesh.add_box(
+            [x, y + 0.42, cz + 0.25],
+            [1.38, 0.05, 0.05],
+            [0.04, 0.04, 0.038],
+        );
+        mesh.add_box(
+            [x + 0.42, y - 0.38, cz + 0.08],
+            [0.12, 0.76, 0.06],
+            [0.04, 0.04, 0.038],
+        );
+    }
+}
+
+fn add_rooftop_clutter(
+    mesh: &mut Mesh,
+    cx: f32,
+    cz: f32,
+    sx: f32,
+    sz: f32,
+    height: f32,
+    style: i32,
+) {
+    let base_y = height + 0.34;
+    mesh.add_box(
+        [cx - sx * 0.26, base_y, cz - sz * 0.12],
+        [0.62, 0.45, 0.70],
+        [0.22, 0.24, 0.24],
     );
     mesh.add_box(
-        [cx - sx * 0.22, height + 0.58, cz + sz * 0.16],
-        [0.08, 0.48, 0.08],
-        [0.7, 0.74, 0.72],
+        [cx + sx * 0.18, base_y + 0.18, cz + sz * 0.18],
+        [0.42, 0.82, 0.42],
+        [0.14, 0.15, 0.14],
     );
-    mesh.add_box(
-        [cx + sx * 0.18, height + 0.5, cz - sz * 0.18],
-        [0.26, 0.18, 0.26],
-        [0.42, 0.48, 0.50],
-    );
+    if style % 2 == 0 {
+        mesh.add_box(
+            [cx + sx * 0.36, base_y + 0.52, cz - sz * 0.24],
+            [0.15, 1.05, 0.15],
+            [0.18, 0.18, 0.17],
+        );
+        mesh.add_box(
+            [cx + sx * 0.36, base_y + 1.13, cz - sz * 0.24],
+            [0.72, 0.20, 0.72],
+            [0.10, 0.10, 0.095],
+        );
+    }
 }
 
 fn build_city_mesh() -> Mesh {
     let mut mesh = Mesh::new();
-    mesh.add_box([0.0, -0.08, 0.0], [38.0, 0.16, 38.0], [0.07, 0.10, 0.12]);
-    for road in [-8.0, 0.0, 8.0] {
-        mesh.add_box([road, 0.01, 0.0], [1.2, 0.04, 36.0], [0.015, 0.017, 0.019]);
-        mesh.add_box([0.0, 0.02, road], [36.0, 0.04, 1.2], [0.015, 0.017, 0.019]);
-        mesh.add_box(
-            [road - 0.62, 0.045, 0.0],
-            [0.05, 0.04, 36.0],
-            [0.42, 0.36, 0.22],
-        );
-        mesh.add_box(
-            [0.0, 0.05, road + 0.62],
-            [36.0, 0.04, 0.05],
-            [0.42, 0.36, 0.22],
-        );
+    mesh.add_box(
+        [0.0, -0.08, 0.0],
+        [100.0, 0.16, 100.0],
+        [0.045, 0.052, 0.055],
+    );
+    // main wet avenue, side street, alley, sidewalks and curbs
+    mesh.add_box([0.0, 0.02, 0.0], [13.0, 0.05, 100.0], [0.018, 0.019, 0.020]);
+    mesh.add_box(
+        [18.0, 0.025, -10.0],
+        [7.0, 0.05, 72.0],
+        [0.017, 0.018, 0.020],
+    );
+    mesh.add_box(
+        [0.0, 0.03, -16.0],
+        [100.0, 0.05, 8.0],
+        [0.016, 0.017, 0.018],
+    );
+    for x in [-8.0, 8.0, 14.2, 21.8] {
+        mesh.add_box([x, 0.08, 0.0], [0.35, 0.18, 100.0], [0.34, 0.30, 0.24]);
     }
-    for x in -5i32..=5 {
-        for z in -5i32..=5 {
-            if x % 3 == 0 || z % 3 == 0 {
-                continue;
-            }
-            let xf = x as f32 * 3.0;
-            let zf = z as f32 * 3.0;
-            let height = 1.8 + ((x * x + z * z + 7) % 9) as f32 * 0.62;
-            let color = [
-                0.10 + height * 0.018,
-                0.15 + (x.abs() as f32) * 0.012,
-                0.22 + (z.abs() as f32) * 0.014,
-            ];
-            let footprint = [
-                1.55 + (x.abs() % 2) as f32 * 0.28,
-                height,
-                1.55 + (z.abs() % 2) as f32 * 0.28,
-            ];
-            build_detailed_building(
-                &mut mesh,
-                [xf, 0.0, zf],
-                footprint,
-                color,
-                [0.50, 0.56, 0.60],
-                x * 31 + z * 17,
+    for x in [-11.5, 11.5, 25.5] {
+        mesh.add_box([x, 0.05, 0.0], [6.5, 0.08, 100.0], [0.12, 0.115, 0.105]);
+    }
+    for z in [-20.4, -11.6] {
+        mesh.add_box([0.0, 0.08, z], [100.0, 0.18, 0.35], [0.34, 0.30, 0.24]);
+    }
+    for lane in [-2.7, 2.7] {
+        for z in (-48..48).step_by(9) {
+            mesh.add_box(
+                [lane, 0.075, z as f32],
+                [0.16, 0.035, 3.4],
+                [0.80, 0.70, 0.42],
             );
         }
     }
-    build_detailed_building(
-        &mut mesh,
-        [0.0, 0.0, 0.0],
-        [3.0, 7.2, 3.0],
-        [0.15, 0.24, 0.43],
-        [0.90, 0.72, 0.34],
-        91,
-    );
-    mesh.add_box([0.0, 7.75, 0.0], [0.16, 0.8, 0.16], [1.0, 0.86, 0.42]);
+    for z in (-44..42).step_by(12) {
+        mesh.add_box(
+            [-5.1, 0.07, z as f32],
+            [3.2, 0.035, 0.18],
+            [0.82, 0.80, 0.72],
+        );
+    }
+    for z in (-46..44).step_by(15) {
+        mesh.add_box(
+            [3.9, 0.082, z as f32],
+            [0.82, 0.035, 0.82],
+            [0.045, 0.045, 0.042],
+        );
+        mesh.add_box(
+            [-7.95, 0.20, z as f32 + 2.8],
+            [0.10, 0.20, 1.4],
+            [0.09, 0.08, 0.065],
+        );
+        mesh.add_box(
+            [7.95, 0.20, z as f32 - 2.1],
+            [0.10, 0.20, 1.2],
+            [0.09, 0.08, 0.065],
+        );
+    }
+    for i in 0..18 {
+        let z = -47.0 + i as f32 * 5.5;
+        mesh.add_box(
+            [hash01(i * 17) * 3.4 - 1.7, 0.085, z],
+            [0.055, 0.03, 1.4 + hash01(i) * 1.2],
+            [0.028, 0.027, 0.025],
+        );
+    }
+
+    let blocks = [
+        (-15.0, -34.0, 7.0, 10.0, 12.0),
+        (-16.0, -21.0, 8.5, 8.0, 18.0),
+        (-16.5, -6.0, 9.0, 9.5, 9.0),
+        (-15.5, 8.0, 8.0, 12.0, 15.0),
+        (-15.0, 25.0, 9.0, 10.0, 22.0),
+        (14.0, -36.0, 8.5, 10.0, 16.0),
+        (14.5, -23.0, 7.5, 7.5, 11.0),
+        (30.0, -20.0, 10.0, 13.0, 24.0),
+        (13.5, 2.0, 8.0, 11.0, 14.0),
+        (15.0, 20.0, 9.5, 13.0, 28.0),
+    ];
+    for (i, b) in blocks.iter().enumerate() {
+        build_hero_building(
+            &mut mesh,
+            b.0,
+            b.1,
+            b.2,
+            b.3,
+            b.4,
+            i as i32,
+            i % 2 == 0 || i == 7,
+        );
+    }
+    // distant skyline layers / landmark focal point
+    for i in 0..18 {
+        let x = -42.0 + i as f32 * 5.1;
+        let h = 18.0 + hash01(i * 9) * 32.0;
+        build_hero_building(
+            &mut mesh,
+            x,
+            -54.0,
+            3.8 + hash01(i) * 2.5,
+            5.0,
+            h,
+            30 + i,
+            false,
+        );
+    }
+    build_hero_building(&mut mesh, 35.0, -58.0, 8.0, 7.0, 48.0, 77, false);
+    mesh.add_box([35.0, 73.5, -58.0], [0.20, 3.5, 0.20], [1.0, 0.72, 0.35]);
+    // street lights, poles, wires, signs, cars, planters, bins
+    for (i, z) in (-42..40).step_by(10).enumerate() {
+        for x in [-7.2, 7.2, 13.3, 22.7] {
+            mesh.add_box([x, 1.8, z as f32], [0.10, 3.5, 0.10], [0.08, 0.08, 0.075]);
+            mesh.add_box(
+                [x + if x < 0.0 { -0.45 } else { 0.45 }, 3.45, z as f32],
+                [0.9, 0.08, 0.08],
+                [0.09, 0.085, 0.075],
+            );
+            mesh.add_box(
+                [x + if x < 0.0 { -0.86 } else { 0.86 }, 3.35, z as f32],
+                [0.22, 0.22, 0.22],
+                [1.0, 0.55, 0.20],
+            );
+        }
+        add_moving_car(
+            &mut mesh,
+            if i % 2 == 0 { -2.2 } else { 2.3 },
+            z as f32 + hash01(i as i32) * 3.0,
+            [0.05 + hash01(i as i32) * 0.2, 0.06, 0.07],
+        );
+    }
+    for i in 0..12 {
+        let x = if i % 2 == 0 { -10.2 } else { 10.4 };
+        add_pedestrian(
+            &mut mesh,
+            x + hash01(i * 23) * 0.9,
+            -39.0 + i as f32 * 6.8,
+            [
+                0.05 + hash01(i * 11) * 0.08,
+                0.045,
+                0.04 + hash01(i * 7) * 0.10,
+            ],
+        );
+    }
+    for i in 0..14 {
+        let x = if i % 2 == 0 { -10.2 } else { 10.4 };
+        let z = -43.0 + i as f32 * 6.3;
+        mesh.add_box([x, 0.35, z], [0.55, 0.70, 0.55], [0.08, 0.15, 0.08]);
+        mesh.add_box([x, 0.9, z], [0.95, 0.30, 0.95], [0.05, 0.18, 0.06]);
+    }
+    for i in 0..10 {
+        mesh.add_box(
+            [-6.2, 2.8, -44.0 + i as f32 * 8.0],
+            [0.04, 0.04, 8.0],
+            [0.035, 0.032, 0.03],
+        );
+    }
     mesh
 }
 
