@@ -134,6 +134,19 @@ fn aces_tonemap(x: vec3<f32>) -> vec3<f32> {
 }
 
 @fragment
+fn fs_sky(input: FullOut) -> @location(0) vec4<f32> {
+    let ndc = vec4<f32>(input.uv * 2.0 - vec2<f32>(1.0), 1.0, 1.0);
+    let world = uniforms.inv_view_proj * ndc;
+    let dir = normalize(world.xyz / world.w - uniforms.camera_position.xyz);
+    var color = sky_color_for_dir(dir);
+    let cloud_band = smoothstep(0.02, 0.22, dir.y) * (1.0 - smoothstep(0.42, 0.82, dir.y));
+    let cloud_noise = hash21(floor((dir.xz / max(dir.y + 0.18, 0.06)) * 18.0 + uniforms.settings.xx * 0.015));
+    let cloud = cloud_band * smoothstep(0.52, 0.82, cloud_noise) * 0.22;
+    color = mix(color, uniforms.sun_color.rgb * 0.85 + vec3<f32>(0.35, 0.19, 0.14), cloud);
+    return vec4<f32>(color, 1.0);
+}
+
+@fragment
 fn fs_post(input: FullOut) -> @location(0) vec4<f32> {
     let dims = vec2<f32>(textureDimensions(hdr_scene));
     let texel = 1.0 / dims;

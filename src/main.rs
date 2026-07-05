@@ -224,13 +224,13 @@ struct DepthTexture {
 }
 
 impl DepthTexture {
-    fn create(device: &wgpu::Device, config: &wgpu::SurfaceConfiguration) -> Self {
+    fn create(device: &wgpu::Device, width: u32, height: u32) -> Self {
         let format = wgpu::TextureFormat::Depth24Plus;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("city depth texture"),
             size: wgpu::Extent3d {
-                width: config.width,
-                height: config.height,
+                width: width.max(1),
+                height: height.max(1),
                 depth_or_array_layers: 1,
             },
             mip_level_count: 1,
@@ -358,6 +358,7 @@ struct State {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    sky_pipeline: wgpu::RenderPipeline,
     render_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
@@ -368,6 +369,7 @@ struct State {
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     depth: DepthTexture,
+    render_scale: f32,
     clock: AppClock,
 }
 
@@ -413,12 +415,16 @@ impl State {
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
+        let render_scale = configured_render_scale();
+        let hdr_width = scaled_extent(config.width, render_scale);
+        let hdr_height = scaled_extent(config.height, render_scale);
 
         let mesh = build_city_mesh();
         eprintln!(
-            "city stats: vertices={} indices={} draw_calls=2 render_scale=1.0 postprocess=bloom+vignette+filmic",
+            "city stats: vertices={} indices={} draw_calls=3 render_scale={:.2} postprocess=bloom+vignette+filmic",
             mesh.vertices.len(),
-            mesh.indices.len()
+            mesh.indices.len(),
+            render_scale
         );
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("city vertices"),
@@ -464,7 +470,7 @@ impl State {
                 resource: uniform_buffer.as_entire_binding(),
             }],
         });
-        let depth = DepthTexture::create(&device, &config);
+        let depth = DepthTexture::create(&device, hdr_width, hdr_height);
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post texture layout"),
             entries: &[
@@ -486,12 +492,42 @@ impl State {
                 },
             ],
         });
-        let hdr = HdrTarget::create(&device, config.width, config.height, &post_layout);
+        let hdr = HdrTarget::create(&device, hdr_width, hdr_height, &post_layout);
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("city pipeline layout"),
             bind_group_layouts: &[Some(&uniform_layout)],
             immediate_size: 0,
+        });
+        let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sky pipeline layout"),
+            bind_group_layouts: &[Some(&uniform_layout)],
+            immediate_size: 0,
+        });
+        let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("procedural sunset sky pipeline"),
+            layout: Some(&sky_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_sky"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: hdr.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
         });
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("city render pipeline"),
@@ -563,6 +599,7 @@ impl State {
             device,
             queue,
             config,
+            sky_pipeline,
             render_pipeline,
             post_pipeline,
             post_layout,
@@ -573,6 +610,7 @@ impl State {
             uniform_buffer,
             uniform_bind_group,
             depth,
+            render_scale,
             clock: AppClock::new(),
         }
     }
@@ -584,13 +622,10 @@ impl State {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
-        self.depth = DepthTexture::create(&self.device, &self.config);
-        self.hdr = HdrTarget::create(
-            &self.device,
-            self.config.width,
-            self.config.height,
-            &self.post_layout,
-        );
+        let hdr_width = scaled_extent(self.config.width, self.render_scale);
+        let hdr_height = scaled_extent(self.config.height, self.render_scale);
+        self.depth = DepthTexture::create(&self.device, hdr_width, hdr_height);
+        self.hdr = HdrTarget::create(&self.device, hdr_width, hdr_height, &self.post_layout);
     }
 
     fn update(&self) {
@@ -626,18 +661,34 @@ impl State {
             });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("procedural sky render pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.hdr.view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.sky_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("city render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &self.hdr.view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.95,
-                            g: 0.34,
-                            b: 0.12,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -685,6 +736,18 @@ impl State {
         self.queue.present(frame);
         RenderOutcome::Presented
     }
+}
+
+fn configured_render_scale() -> f32 {
+    match option_env!("WEBGPU_CITY_RENDER_SCALE") {
+        Some("0.7") | Some("0.70") => 0.70,
+        Some("0.85") => 0.85,
+        _ => 1.0,
+    }
+}
+
+fn scaled_extent(value: u32, scale: f32) -> u32 {
+    ((value as f32 * scale).round() as u32).max(1)
 }
 
 #[derive(Clone, Copy)]
