@@ -7,7 +7,8 @@ use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    dpi::PhysicalPosition,
+    event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowId},
 };
@@ -617,6 +618,7 @@ struct State {
     shadow: ShadowTexture,
     render_scale: f32,
     clock: AppClock,
+    camera: CameraController,
 }
 
 impl State {
@@ -683,7 +685,8 @@ impl State {
             usage: wgpu::BufferUsages::INDEX,
         });
         let mut uniforms = Uniforms::new();
-        let (initial_view_proj, initial_eye) = camera_matrix(config.width, config.height, 0.0);
+        let camera = CameraController::new();
+        let (initial_view_proj, initial_eye) = camera.matrix(config.width, config.height, 0.0);
         uniforms.view_proj = initial_view_proj.into();
         uniforms.inv_view_proj = initial_view_proj
             .invert()
@@ -938,6 +941,7 @@ impl State {
             shadow,
             render_scale,
             clock: AppClock::new(),
+            camera,
         }
     }
 
@@ -956,7 +960,9 @@ impl State {
 
     fn update(&self) {
         let elapsed = self.clock.elapsed_secs();
-        let (view_proj, eye) = camera_matrix(self.config.width, self.config.height, elapsed);
+        let (view_proj, eye) = self
+            .camera
+            .matrix(self.config.width, self.config.height, elapsed);
         let mut uniforms = Uniforms::new();
         uniforms.view_proj = view_proj.into();
         uniforms.inv_view_proj = view_proj.invert().unwrap_or_else(Matrix4::identity).into();
@@ -965,6 +971,14 @@ impl State {
         uniforms.settings[0] = elapsed;
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
+    }
+
+    fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+        self.camera.handle_cursor_moved(position);
+    }
+
+    fn handle_mouse_input(&mut self, button: MouseButton, state: ElementState) {
+        self.camera.handle_mouse_input(button, state);
     }
 
     fn render(&mut self) -> RenderOutcome {
@@ -1115,6 +1129,109 @@ enum CameraMode {
     HeroStreet,
 }
 
+struct CameraController {
+    yaw_offset: f32,
+    pitch_offset: f32,
+    pan: Vector3<f32>,
+    last_cursor: Option<PhysicalPosition<f64>>,
+    left_dragging: bool,
+}
+
+impl CameraController {
+    const ROTATION_SENSITIVITY: f32 = 0.003;
+    const PAN_SENSITIVITY: f32 = 0.018;
+    const MIN_CAMERA_Y: f32 = 0.25;
+    const MIN_PITCH: f32 = -0.35;
+    const MAX_PITCH: f32 = 0.85;
+
+    fn new() -> Self {
+        Self {
+            yaw_offset: 0.0,
+            pitch_offset: 0.0,
+            pan: Vector3::new(0.0, 0.0, 0.0),
+            last_cursor: None,
+            left_dragging: false,
+        }
+    }
+
+    fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
+        if let Some(last) = self.last_cursor {
+            let delta_x = (position.x - last.x) as f32;
+            let delta_y = (position.y - last.y) as f32;
+
+            if self.left_dragging {
+                let (_, target) = camera_base_pose(0.0);
+                let eye = self.eye_for_target(target);
+                let forward = (target - eye).normalize();
+                let right = forward.cross(Vector3::unit_y()).normalize();
+                self.pan += right * (-delta_x * Self::PAN_SENSITIVITY);
+                self.pan += Vector3::unit_y() * (-delta_y * Self::PAN_SENSITIVITY);
+                self.clamp_pan_to_horizon();
+            } else {
+                self.yaw_offset += delta_x * Self::ROTATION_SENSITIVITY;
+                self.pitch_offset = (self.pitch_offset - delta_y * Self::ROTATION_SENSITIVITY)
+                    .clamp(Self::MIN_PITCH, Self::MAX_PITCH);
+            }
+        }
+
+        self.last_cursor = Some(position);
+    }
+
+    fn handle_mouse_input(&mut self, button: MouseButton, state: ElementState) {
+        if button == MouseButton::Left {
+            self.left_dragging = state == ElementState::Pressed;
+            if state == ElementState::Released {
+                self.last_cursor = None;
+            }
+        }
+    }
+
+    fn matrix(&self, width: u32, height: u32, time: f32) -> (Matrix4<f32>, Point3<f32>) {
+        let aspect = width as f32 / height as f32;
+        let (base_eye, base_target) = camera_base_pose(time);
+        let mut target = base_target + self.pan;
+        let mut eye = self.eye_for_target_from(base_eye, base_target) + self.pan;
+        if eye.y < Self::MIN_CAMERA_Y {
+            let correction = Self::MIN_CAMERA_Y - eye.y;
+            eye.y += correction;
+            target.y += correction;
+        }
+        let view = Matrix4::look_at_rh(eye, target, Vector3::unit_y());
+        let proj = perspective(Deg(camera_fov()), aspect, 0.1, 220.0);
+        (proj * view, eye)
+    }
+
+    fn eye_for_target(&self, target: Point3<f32>) -> Point3<f32> {
+        let (base_eye, base_target) = camera_base_pose(0.0);
+        self.eye_for_target_from(base_eye, base_target) + (target - base_target)
+    }
+
+    fn eye_for_target_from(&self, base_eye: Point3<f32>, base_target: Point3<f32>) -> Point3<f32> {
+        let offset = base_eye - base_target;
+        let radius = offset.magnitude();
+        let base_yaw = offset.x.atan2(offset.z);
+        let base_pitch = (offset.y / radius).asin();
+        let yaw = base_yaw + self.yaw_offset;
+        let pitch = (base_pitch + self.pitch_offset).clamp(Self::MIN_PITCH, Self::MAX_PITCH);
+        let horizontal = radius * pitch.cos();
+
+        Point3::new(
+            base_target.x + horizontal * yaw.sin(),
+            base_target.y + radius * pitch.sin(),
+            base_target.z + horizontal * yaw.cos(),
+        )
+    }
+
+    fn clamp_pan_to_horizon(&mut self) {
+        let (_, base_target) = camera_base_pose(0.0);
+        let eye = self.eye_for_target(base_target) + self.pan;
+
+        if eye.y < Self::MIN_CAMERA_Y {
+            self.pan.y += Self::MIN_CAMERA_Y - eye.y;
+        }
+    }
+}
+
 fn sunset_sun_direction() -> Vector3<f32> {
     let elevation = 5.5_f32.to_radians();
     let azimuth = 220.0_f32.to_radians();
@@ -1135,14 +1252,23 @@ fn light_matrix() -> Matrix4<f32> {
     proj * view
 }
 
-fn camera_matrix(width: u32, height: u32, time: f32) -> (Matrix4<f32>, Point3<f32>) {
-    let aspect = width as f32 / height as f32;
-    let mode = match option_env!("WEBGPU_CITY_CAMERA") {
+fn camera_mode() -> CameraMode {
+    match option_env!("WEBGPU_CITY_CAMERA") {
         Some("orbit") => CameraMode::CinematicOrbit,
         Some("hero") | Some("street") => CameraMode::HeroStreet,
         _ => CameraMode::RooftopVista,
-    };
-    let (eye, target) = match mode {
+    }
+}
+
+fn camera_fov() -> f32 {
+    match camera_mode() {
+        CameraMode::RooftopVista => 42.0,
+        _ => 50.0,
+    }
+}
+
+fn camera_base_pose(time: f32) -> (Point3<f32>, Point3<f32>) {
+    match camera_mode() {
         CameraMode::RooftopVista => (Point3::new(10.5, 8.8, 18.5), Point3::new(-5.5, 4.2, -31.0)),
         CameraMode::HeroStreet => (
             Point3::new(1.35, 2.85, 20.0),
@@ -1157,14 +1283,7 @@ fn camera_matrix(width: u32, height: u32, time: f32) -> (Matrix4<f32>, Point3<f3
             );
             (eye, Point3::new(0.0, 2.8 + (time * 0.13).cos() * 0.5, 0.0))
         }
-    };
-    let view = Matrix4::look_at_rh(eye, target, Vector3::unit_y());
-    let fov = match mode {
-        CameraMode::RooftopVista => 42.0,
-        _ => 50.0,
-    };
-    let proj = perspective(Deg(fov), aspect, 0.1, 220.0);
-    (proj * view, eye)
+    }
 }
 
 const MAT_ASPHALT: f32 = 0.0;
@@ -2070,6 +2189,14 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
+            WindowEvent::CursorMoved { position, .. } => state.handle_cursor_moved(position),
+            WindowEvent::MouseInput {
+                state: input_state,
+                button,
+                ..
+            } => {
+                state.handle_mouse_input(button, input_state);
+            }
             WindowEvent::RedrawRequested => {
                 #[cfg(target_arch = "wasm32")]
                 {
