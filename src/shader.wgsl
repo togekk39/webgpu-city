@@ -277,33 +277,66 @@ fn fs_post(input: FullOut) -> @location(0) vec4<f32> {
     let sun_clip = uniforms.view_proj * vec4<f32>(uniforms.camera_position.xyz + sun * 200.0, 1.0);
     let sun_ndc = sun_clip.xy / max(sun_clip.w, 0.0001);
     let sun_uv = sun_ndc * 0.5 + vec2<f32>(0.5);
-    let sun_on_screen = step(0.0, sun_clip.w) * step(-0.15, sun_uv.x) * step(sun_uv.x, 1.15) * step(-0.15, sun_uv.y) * step(sun_uv.y, 1.15);
-    let look_sun = smoothstep(0.955, 0.998, dot(view_dir, sun));
-    let source_luma = dot(textureSample(hdr_scene, hdr_sampler, vec2<f32>(sun_uv.x, 1.0 - sun_uv.y)).rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
-    let visible_source = sun_on_screen * smoothstep(1.8, 8.0, source_luma);
+    let sun_on_screen = step(0.0, sun_clip.w) * step(-0.08, sun_uv.x) * step(sun_uv.x, 1.08) * step(-0.08, sun_uv.y) * step(sun_uv.y, 1.08);
+    let look_sun = smoothstep(0.950, 0.998, dot(view_dir, sun));
+    let sun_scene_uv = vec2<f32>(sun_uv.x, 1.0 - sun_uv.y);
 
+    var source_peak = 0.0;
+    var source_dark = 0.0;
+    for (var sx: i32 = -2; sx <= 2; sx = sx + 1) {
+        for (var sy: i32 = -2; sy <= 2; sy = sy + 1) {
+            let tap_uv = sun_scene_uv + vec2<f32>(f32(sx), f32(sy)) * texel * 5.0;
+            let tap_luma = dot(textureSample(hdr_scene, hdr_sampler, tap_uv).rgb, vec3<f32>(0.2126, 0.7152, 0.0722));
+            source_peak = max(source_peak, tap_luma);
+            source_dark += (1.0 - smoothstep(0.18, 1.20, tap_luma)) / 25.0;
+        }
+    }
+    let source_contrast = smoothstep(0.10, 0.68, source_dark) * smoothstep(1.25, 5.5, source_peak);
+    let visible_source = sun_on_screen * smoothstep(1.15, 6.5, source_peak) * (0.45 + source_contrast * 0.85);
+
+    let to_sun = sun_scene_uv - scene_uv;
+    let ray_len = length(to_sun);
+    let ray_dir = to_sun / max(ray_len, 0.0001);
+    let tangent = vec2<f32>(-ray_dir.y, ray_dir.x);
+    let dither = hash21(floor(input.uv * dims) + vec2<f32>(uniforms.settings.x * 23.17, uniforms.settings.x * 9.31));
     var shafts = vec3<f32>(0.0);
     var transmittance = 1.0;
-    for (var i: i32 = 0; i < 18; i = i + 1) {
-        let t = (f32(i) + 0.5) / 18.0;
-        let ray_uv = mix(scene_uv, vec2<f32>(sun_uv.x, 1.0 - sun_uv.y), t);
-        let s = textureSample(hdr_scene, hdr_sampler, ray_uv).rgb;
-        let bright = max(dot(s, vec3<f32>(0.2126, 0.7152, 0.0722)) - 1.08, 0.0);
-        let occluder = 1.0 - smoothstep(0.10, 0.58, dot(s, vec3<f32>(0.2126, 0.7152, 0.0722)));
-        transmittance *= mix(1.0, 0.83, occluder);
-        shafts += uniforms.sun_color.rgb * bright * transmittance * (1.0 - t) * 0.030;
+    var edge_energy = 0.0;
+    var weight_sum = 0.0;
+    for (var i: i32 = 0; i < 48; i = i + 1) {
+        let fi = f32(i);
+        let t = (fi + 0.35 + dither * 0.55) / 48.0;
+        let falloff = pow(1.0 - t, 1.45);
+        let width = mix(0.65, 3.20, t) * texel * (1.0 + ray_len * 1.4);
+        let base_uv = scene_uv + to_sun * t;
+        let tap_a = textureSample(hdr_scene, hdr_sampler, base_uv).rgb;
+        let tap_b = textureSample(hdr_scene, hdr_sampler, base_uv + tangent * width).rgb;
+        let tap_c = textureSample(hdr_scene, hdr_sampler, base_uv - tangent * width).rgb;
+        let luma_a = dot(tap_a, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let luma_b = dot(tap_b, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let luma_c = dot(tap_c, vec3<f32>(0.2126, 0.7152, 0.0722));
+        let beam_luma = max(max(luma_a, luma_b), luma_c);
+        let local_min = min(min(luma_a, luma_b), luma_c);
+        let local_edge = smoothstep(0.20, 2.35, beam_luma - local_min);
+        let blocker = 1.0 - smoothstep(0.12, 0.72, (luma_a + luma_b + luma_c) * 0.3333);
+        transmittance *= mix(0.985, 0.900, blocker * (1.0 - t * 0.55));
+        let bright = max(beam_luma - 0.92, 0.0);
+        shafts += uniforms.sun_color.rgb * bright * transmittance * falloff * (0.012 + local_edge * 0.020);
+        edge_energy += local_edge * falloff;
+        weight_sum += falloff;
     }
-    let radial = 1.0 - smoothstep(0.02, 0.72, distance(input.uv, sun_uv));
-    let edge_occlusion = smoothstep(0.12, 0.92, 1.0 - transmittance);
-    color += shafts * visible_source * radial * (0.35 + edge_occlusion * 1.25);
-    color += uniforms.sun_color.rgb * look_sun * visible_source * 0.22;
+    shafts /= max(weight_sum * 0.23, 0.0001);
+    let radial = 1.0 - smoothstep(0.04, 0.86, distance(input.uv, sun_uv));
+    let partial_occlusion = smoothstep(0.09, 0.70, edge_energy / max(weight_sum, 0.0001)) * smoothstep(0.98, 0.18, transmittance);
+    color += shafts * visible_source * radial * (0.26 + partial_occlusion * 1.65);
+    color += uniforms.sun_color.rgb * look_sun * visible_source * 0.16;
 
     let flare_axis = input.uv - 0.5;
     let sun_axis = sun_uv - 0.5;
-    let ghost1 = 1.0 - smoothstep(0.00, 0.055, distance(flare_axis, -sun_axis * 0.42));
-    let ghost2 = 1.0 - smoothstep(0.00, 0.035, distance(flare_axis, -sun_axis * 0.82));
-    let anamorphic = exp(-abs(input.uv.y - sun_uv.y) * 90.0) * smoothstep(0.72, 0.0, abs(input.uv.x - sun_uv.x));
-    color += (uniforms.sun_color.rgb * ghost1 * 0.030 + vec3<f32>(0.45,0.58,1.0) * ghost2 * 0.018 + uniforms.sun_color.rgb * anamorphic * 0.018) * visible_source;
+    let ghost1 = 1.0 - smoothstep(0.00, 0.052, distance(flare_axis, -sun_axis * 0.42));
+    let ghost2 = 1.0 - smoothstep(0.00, 0.032, distance(flare_axis, -sun_axis * 0.82));
+    let anamorphic = exp(-abs(input.uv.y - sun_uv.y) * 94.0) * smoothstep(0.70, 0.0, abs(input.uv.x - sun_uv.x));
+    color += (uniforms.sun_color.rgb * ghost1 * 0.026 + vec3<f32>(0.45,0.58,1.0) * ghost2 * 0.014 + uniforms.sun_color.rgb * anamorphic * 0.014) * visible_source;
 
     var bloom = vec3<f32>(0.0);
     for (var x: i32 = -2; x <= 2; x = x + 1) {
