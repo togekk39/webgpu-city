@@ -1,5 +1,7 @@
 use cgmath::{Deg, Matrix4, Point3, SquareMatrix, Vector3, perspective};
-use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
+use std::{cell::RefCell, rc::Rc, sync::Arc};
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -152,6 +154,42 @@ enum RenderOutcome {
     Validation,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+struct AppClock {
+    start: Instant,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl AppClock {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+        }
+    }
+
+    fn elapsed_secs(&self) -> f32 {
+        self.start.elapsed().as_secs_f32()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+struct AppClock {
+    start_ms: f64,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl AppClock {
+    fn new() -> Self {
+        Self {
+            start_ms: js_sys::Date::now(),
+        }
+    }
+
+    fn elapsed_secs(&self) -> f32 {
+        ((js_sys::Date::now() - self.start_ms) / 1000.0) as f32
+    }
+}
+
 struct State {
     window: Arc<Window>,
     surface: wgpu::Surface<'static>,
@@ -165,7 +203,7 @@ struct State {
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     depth: DepthTexture,
-    start: Instant,
+    clock: AppClock,
 }
 
 impl State {
@@ -301,7 +339,7 @@ impl State {
             uniform_buffer,
             uniform_bind_group,
             depth,
-            start: Instant::now(),
+            clock: AppClock::new(),
         }
     }
 
@@ -316,7 +354,7 @@ impl State {
     }
 
     fn update(&self) {
-        let elapsed = self.start.elapsed().as_secs_f32();
+        let elapsed = self.clock.elapsed_secs();
         let uniforms = Uniforms {
             view_proj: camera_matrix(self.config.width, self.config.height, elapsed * 0.18).into(),
             light_dir: [0.45, 0.85, 0.25, 0.0],
