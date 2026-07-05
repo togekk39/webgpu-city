@@ -503,11 +503,7 @@ impl ApplicationHandler for App {
     }
 }
 
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
-pub fn main() {
-    #[cfg(target_arch = "wasm32")]
-    console_error_panic_hook::set_once();
-
+fn run_app() {
     let event_loop = EventLoop::new().expect("create event loop");
     let app = App::default();
 
@@ -519,4 +515,19 @@ pub fn main() {
         let mut app = app;
         event_loop.run_app(&mut app).expect("run app");
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
+#[cfg(target_arch = "wasm32")]
+pub fn wasm_main() {
+    console_error_panic_hook::set_once();
+    run_app();
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn main() {
+    run_app();
 }
