@@ -1079,6 +1079,7 @@ impl State {
             });
             pass.set_pipeline(&self.post_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &self.shadow_bind_group, &[]);
             pass.set_bind_group(2, &self.hdr.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
