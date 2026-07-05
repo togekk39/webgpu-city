@@ -31,7 +31,6 @@ struct VertexInput {
     @location(2) normal: vec3<f32>,
     @location(3) uv: vec2<f32>,
     @location(4) material_id: f32,
-    @location(5) shadow_position: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -41,7 +40,6 @@ struct VertexOutput {
     @location(2) normal: vec3<f32>,
     @location(3) uv: vec2<f32>,
     @location(4) material_id: f32,
-    @location(5) shadow_position: vec4<f32>,
 };
 
 fn hash21(p: vec2<f32>) -> f32 {
@@ -132,7 +130,6 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     out.normal = normalize(input.normal);
     out.uv = input.uv;
     out.material_id = input.material_id;
-    out.shadow_position = uniforms.light_view_proj * vec4<f32>(input.position, 1.0);
     return out;
 }
 
