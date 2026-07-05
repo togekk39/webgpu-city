@@ -1,5 +1,5 @@
 use cgmath::{Deg, Matrix4, Point3, SquareMatrix, Vector3, perspective};
-use std::{sync::Arc, time::Instant};
+use std::{cell::RefCell, rc::Rc, sync::Arc, time::Instant};
 use wgpu::util::DeviceExt;
 use winit::{
     application::ApplicationHandler,
@@ -7,6 +7,11 @@ use winit::{
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowId},
 };
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::wasm_bindgen;
+#[cfg(target_arch = "wasm32")]
+use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -425,22 +430,42 @@ fn build_city_mesh() -> Mesh {
 
 #[derive(Default)]
 struct App {
-    state: Option<State>,
+    state: Rc<RefCell<Option<State>>>,
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.state.is_some() {
+        if self.state.borrow().is_some() {
             return;
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
         let attrs = Window::default_attributes().with_title("Rust wgpu 3D City");
+        #[cfg(target_arch = "wasm32")]
+        let attrs = Window::default_attributes()
+            .with_title("Rust wgpu 3D City")
+            .with_append(true);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        self.state = Some(pollster::block_on(State::new(window)));
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            *self.state.borrow_mut() = Some(pollster::block_on(State::new(window)));
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        {
+            let state = Rc::clone(&self.state);
+            wasm_bindgen_futures::spawn_local(async move {
+                *state.borrow_mut() = Some(State::new(window).await);
+                if let Some(state) = state.borrow().as_ref() {
+                    state.window.request_redraw();
+                }
+            });
+        }
     }
 
     fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        self.state = None;
+        *self.state.borrow_mut() = None;
     }
 
     fn window_event(
@@ -449,7 +474,8 @@ impl ApplicationHandler for App {
         window_id: WindowId,
         event: WindowEvent,
     ) {
-        let Some(state) = self.state.as_mut() else {
+        let mut state_ref = self.state.borrow_mut();
+        let Some(state) = state_ref.as_mut() else {
             return;
         };
         if window_id != state.window.id() {
@@ -471,14 +497,26 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Some(state) = &self.state {
+        if let Some(state) = self.state.borrow().as_ref() {
             state.window.request_redraw();
         }
     }
 }
 
-fn main() {
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen(start))]
+pub fn main() {
+    #[cfg(target_arch = "wasm32")]
+    console_error_panic_hook::set_once();
+
     let event_loop = EventLoop::new().expect("create event loop");
-    let mut app = App::default();
-    event_loop.run_app(&mut app).expect("run app");
+    let app = App::default();
+
+    #[cfg(target_arch = "wasm32")]
+    event_loop.spawn_app(app);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let mut app = app;
+        event_loop.run_app(&mut app).expect("run app");
+    }
 }
