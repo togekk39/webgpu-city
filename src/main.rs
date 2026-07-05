@@ -1167,7 +1167,7 @@ impl CameraController {
                 self.pan += Vector3::unit_y() * (-delta_y * Self::PAN_SENSITIVITY);
             } else {
                 self.yaw_offset += delta_x * Self::ROTATION_SENSITIVITY;
-                self.pitch_offset = (self.pitch_offset + delta_y * Self::ROTATION_SENSITIVITY)
+                self.pitch_offset = (self.pitch_offset - delta_y * Self::ROTATION_SENSITIVITY)
                     .clamp(Self::MIN_PITCH, Self::MAX_PITCH);
             }
         }
