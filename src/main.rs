@@ -1,8 +1,10 @@
 use cgmath::{Deg, Matrix4, Point3, SquareMatrix, Vector3, perspective};
-use std::{cell::RefCell, rc::Rc, sync::Arc};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 use wgpu::util::DeviceExt;
+#[cfg(target_arch = "wasm32")]
+use winit::dpi::PhysicalSize;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -14,6 +16,30 @@ use winit::{
 use wasm_bindgen::prelude::wasm_bindgen;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
+
+#[cfg(target_arch = "wasm32")]
+fn browser_viewport_size(window: &Window) -> Option<PhysicalSize<u32>> {
+    let global = js_sys::global();
+    let width = js_sys::Reflect::get(&global, &"innerWidth".into())
+        .ok()?
+        .as_f64()?;
+    let height = js_sys::Reflect::get(&global, &"innerHeight".into())
+        .ok()?
+        .as_f64()?;
+    let scale_factor = window.scale_factor();
+
+    Some(PhysicalSize::new(
+        (width * scale_factor).round().max(1.0) as u32,
+        (height * scale_factor).round().max(1.0) as u32,
+    ))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn sync_canvas_to_viewport(window: &Window) -> PhysicalSize<u32> {
+    let size = browser_viewport_size(window).unwrap_or_else(|| window.inner_size());
+    let _ = window.request_inner_size(size);
+    size
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -208,6 +234,9 @@ struct State {
 
 impl State {
     async fn new(window: Arc<Window>) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        let size = sync_canvas_to_viewport(&window);
+        #[cfg(not(target_arch = "wasm32"))]
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
         let surface = instance
@@ -485,6 +514,9 @@ impl ApplicationHandler for App {
             .with_append(true);
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
+        #[cfg(target_arch = "wasm32")]
+        sync_canvas_to_viewport(&window);
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             *self.state.borrow_mut() = Some(pollster::block_on(State::new(window)));
@@ -522,14 +554,24 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
-            WindowEvent::RedrawRequested => match state.render() {
-                RenderOutcome::Presented => {}
-                RenderOutcome::Lost | RenderOutcome::Outdated => {
-                    state.resize(state.config.width, state.config.height)
+            WindowEvent::RedrawRequested => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    let size = sync_canvas_to_viewport(&state.window);
+                    if size.width != state.config.width || size.height != state.config.height {
+                        state.resize(size.width, size.height);
+                    }
                 }
-                RenderOutcome::Timeout | RenderOutcome::Occluded => {}
-                RenderOutcome::Validation => event_loop.exit(),
-            },
+
+                match state.render() {
+                    RenderOutcome::Presented => {}
+                    RenderOutcome::Lost | RenderOutcome::Outdated => {
+                        state.resize(state.config.width, state.config.height)
+                    }
+                    RenderOutcome::Timeout | RenderOutcome::Occluded => {}
+                    RenderOutcome::Validation => event_loop.exit(),
+                }
+            }
             _ => {}
         }
     }
