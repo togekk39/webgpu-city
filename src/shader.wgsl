@@ -72,7 +72,9 @@ fn material_response(id: f32) -> vec4<f32> {
     if (id < 6.5) { return vec4<f32>(0.42, 0.14, 1.65, 1.0); }      // emissive windows/signs, controlled bloom
     if (id < 7.5) { return vec4<f32>(0.48, 0.24, 0.00, 0.0); }      // metal
     if (id < 8.5) { return vec4<f32>(0.82, 0.02, 0.00, 0.0); }      // road marking
-    return vec4<f32>(0.70, 0.03, 0.00, 0.0);                       // foliage
+    if (id < 9.5) { return vec4<f32>(0.70, 0.03, 0.00, 0.0); }      // foliage
+    if (id < 10.5) { return vec4<f32>(0.92, 0.06, 0.00, 0.0); }     // dark roof tar atlas tile
+    return vec4<f32>(0.22, 0.62, 0.00, 0.0);                       // solar/gloss panel atlas tile
 }
 
 fn sky_color_for_dir(dir: vec3<f32>) -> vec3<f32> {
@@ -105,7 +107,25 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     var base = input.color;
 
     let fine_noise = fbm(input.world_position.xz * 0.65 + input.uv * 0.35);
-    base *= 0.94 + fine_noise * 0.10;
+    base *= 0.96 + fine_noise * 0.06;
+    let atlas_uv = fract(input.uv * 0.55);
+    if (input.material_id > 1.5 && input.material_id < 2.5) {
+        let mortar_x = step(0.07, atlas_uv.x) * step(atlas_uv.x, 0.93);
+        let mortar_y = step(0.13, atlas_uv.y) * step(atlas_uv.y, 0.87);
+        base *= mix(vec3<f32>(0.55,0.50,0.46), vec3<f32>(1.08,0.88,0.76), mortar_x * mortar_y);
+    }
+    if (input.material_id > 0.5 && input.material_id < 1.5) {
+        let aggregate = smoothstep(0.25, 0.95, fbm(input.uv * 3.7));
+        base *= mix(vec3<f32>(0.78,0.78,0.76), vec3<f32>(1.10,1.07,1.00), aggregate * 0.45);
+    }
+    if (input.material_id > 9.5 && input.material_id < 10.5) {
+        let seams = min(smoothstep(0.035, 0.055, fract(input.uv.x * 1.7)), smoothstep(0.035, 0.055, fract(input.uv.y * 1.2)));
+        base *= mix(vec3<f32>(0.58,0.56,0.54), vec3<f32>(1.0), seams);
+    }
+    if (input.material_id > 10.5 && input.material_id < 11.5) {
+        let grid = step(0.08, fract(input.uv.x * 6.0)) * step(0.08, fract(input.uv.y * 2.0));
+        base = mix(vec3<f32>(0.015,0.020,0.025), base * 1.25, grid);
+    }
     let rain = fbm(vec2<f32>(input.world_position.x * 1.8 + input.world_position.z * 0.25, input.world_position.y * 0.13));
     let streaks = smoothstep(0.48, 0.86, rain) * smoothstep(14.0, 1.0, input.world_position.y);
     let grime = streaks * 0.10;
@@ -148,7 +168,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let dist = length(input.world_position - uniforms.camera_position.xyz);
     let height_fog = clamp(1.0 - input.world_position.y / 24.0, 0.08, 0.85);
     let depth_bias = smoothstep(18.0, 80.0, dist);
-    let fog = (1.0 - exp(-dist * uniforms.settings.z * 0.52 * height_fog)) * depth_bias;
+    let fog = (1.0 - exp(-dist * uniforms.settings.z * 0.42 * height_fog)) * depth_bias;
     let view_dir = normalize(input.world_position - uniforms.camera_position.xyz);
     let warm_haze = mix(sky_color_for_dir(view_dir), uniforms.sun_color.rgb * 0.58 + vec3<f32>(0.25, 0.18, 0.13), 0.32);
     color = mix(color, warm_haze, clamp(fog, 0.0, 0.62));
@@ -203,8 +223,8 @@ fn fs_post(input: FullOut) -> @location(0) vec4<f32> {
     let luma = dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
     color = mix(color * vec3<f32>(0.88, 0.94, 1.06), color * vec3<f32>(1.08, 0.98, 0.88), smoothstep(0.35, 1.8, luma));
     let d = distance(input.uv, vec2<f32>(0.5));
-    color *= 1.0 - smoothstep(0.42, 0.82, d) * 0.20;
-    color += (hash21(input.uv * dims + uniforms.settings.xx) - 0.5) * 0.004;
+    color *= 1.0 - smoothstep(0.46, 0.88, d) * 0.10;
+    color += (hash21(input.uv * dims + uniforms.settings.xx) - 0.5) * 0.0015;
     color = aces_tonemap(color);
     color = pow(color, vec3<f32>(1.0 / 2.2));
     return vec4<f32>(color, 1.0);

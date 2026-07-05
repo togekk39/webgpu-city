@@ -950,18 +950,20 @@ fn scaled_extent(value: u32, scale: f32) -> u32 {
 
 #[derive(Clone, Copy)]
 enum CameraMode {
+    RooftopVista,
     CinematicOrbit,
     HeroStreet,
 }
 
 fn camera_matrix(width: u32, height: u32, time: f32) -> (Matrix4<f32>, Point3<f32>) {
     let aspect = width as f32 / height as f32;
-    let mode = if option_env!("WEBGPU_CITY_CAMERA") == Some("orbit") {
-        CameraMode::CinematicOrbit
-    } else {
-        CameraMode::HeroStreet
+    let mode = match option_env!("WEBGPU_CITY_CAMERA") {
+        Some("orbit") => CameraMode::CinematicOrbit,
+        Some("hero") | Some("street") => CameraMode::HeroStreet,
+        _ => CameraMode::RooftopVista,
     };
     let (eye, target) = match mode {
+        CameraMode::RooftopVista => (Point3::new(10.5, 8.8, 18.5), Point3::new(-5.5, 4.2, -31.0)),
         CameraMode::HeroStreet => (
             Point3::new(1.35, 2.85, 20.0),
             Point3::new(-0.25, 1.85, -16.0),
@@ -977,7 +979,11 @@ fn camera_matrix(width: u32, height: u32, time: f32) -> (Matrix4<f32>, Point3<f3
         }
     };
     let view = Matrix4::look_at_rh(eye, target, Vector3::unit_y());
-    let proj = perspective(Deg(50.0), aspect, 0.1, 140.0);
+    let fov = match mode {
+        CameraMode::RooftopVista => 42.0,
+        _ => 50.0,
+    };
+    let proj = perspective(Deg(fov), aspect, 0.1, 220.0);
     (proj * view, eye)
 }
 
@@ -989,8 +995,12 @@ const MAT_CURTAIN_WALL: f32 = 4.0;
 const MAT_SHOP_GLASS: f32 = 5.0;
 const MAT_EMISSIVE_WINDOW: f32 = 6.0;
 const MAT_METAL: f32 = 7.0;
+#[allow(dead_code)]
 const MAT_MARKING: f32 = 8.0;
+#[allow(dead_code)]
 const MAT_FOLIAGE: f32 = 9.0;
+const MAT_ROOF_TAR: f32 = 10.0;
+const MAT_SOLAR: f32 = 11.0;
 
 #[derive(Clone, Copy)]
 enum FacadeKind {
@@ -1280,6 +1290,7 @@ fn build_building(mesh: &mut Mesh, center: [f32; 3], size: [f32; 3], kind: Facad
     }
 }
 
+#[allow(dead_code)]
 fn build_streetlight(mesh: &mut Mesh, x: f32, z: f32) {
     mesh.add_prism([x, 0.8, z], 0.04, 1.6, 8, [0.18, 0.16, 0.14], MAT_METAL);
     mesh.add_box(
@@ -1296,7 +1307,259 @@ fn build_streetlight(mesh: &mut Mesh, x: f32, z: f32) {
     );
 }
 
-fn build_city_mesh() -> Mesh {
+fn add_rooftop_kit(mesh: &mut Mesh, cx: f32, roof_y: f32, cz: f32, sx: f32, sz: f32, seed: i32) {
+    let parapet = [0.11, 0.105, 0.095];
+    mesh.add_box(
+        [cx, roof_y + 0.22, cz - sz * 0.50],
+        [sx + 0.12, 0.44, 0.12],
+        parapet,
+        MAT_CONCRETE,
+    );
+    mesh.add_box(
+        [cx, roof_y + 0.22, cz + sz * 0.50],
+        [sx + 0.12, 0.44, 0.12],
+        parapet,
+        MAT_CONCRETE,
+    );
+    mesh.add_box(
+        [cx - sx * 0.50, roof_y + 0.22, cz],
+        [0.12, 0.44, sz],
+        parapet,
+        MAT_CONCRETE,
+    );
+    mesh.add_box(
+        [cx + sx * 0.50, roof_y + 0.22, cz],
+        [0.12, 0.44, sz],
+        parapet,
+        MAT_CONCRETE,
+    );
+    mesh.add_beveled_box(
+        [cx - sx * 0.23, roof_y + 0.18, cz + sz * 0.12],
+        [sx * 0.22, 0.20, sz * 0.28],
+        0.015,
+        [0.030, 0.028, 0.026],
+        MAT_ROOF_TAR,
+    );
+    mesh.add_beveled_box(
+        [cx + sx * 0.18, roof_y + 0.32, cz - sz * 0.18],
+        [sx * 0.20, 0.64, sz * 0.18],
+        0.025,
+        [0.22, 0.22, 0.20],
+        MAT_METAL,
+    );
+    mesh.add_prism(
+        [cx - sx * 0.34, roof_y + 0.48, cz - sz * 0.28],
+        0.20,
+        0.42,
+        12,
+        [0.30, 0.31, 0.30],
+        MAT_METAL,
+    );
+    mesh.add_prism(
+        [cx - sx * 0.34, roof_y + 0.90, cz - sz * 0.28],
+        0.13,
+        0.44,
+        12,
+        [0.08, 0.07, 0.06],
+        MAT_METAL,
+    );
+    mesh.add_beveled_box(
+        [cx + sx * 0.32, roof_y + 0.62, cz + sz * 0.26],
+        [0.50, 0.92, 0.42],
+        0.02,
+        [0.18, 0.16, 0.14],
+        MAT_BRICK,
+    );
+    mesh.add_box(
+        [cx + sx * 0.05, roof_y + 0.18, cz + sz * 0.32],
+        [sx * 0.24, 0.12, 0.18],
+        [0.09, 0.17, 0.22],
+        MAT_SOLAR,
+    );
+    mesh.add_box(
+        [cx + sx * 0.05, roof_y + 0.24, cz + sz * 0.32],
+        [sx * 0.24, 0.025, 0.19],
+        [0.025, 0.035, 0.045],
+        MAT_WINDOW_PANE,
+    );
+    for i in 0..3 {
+        let x = cx - sx * 0.30 + i as f32 * sx * 0.22;
+        mesh.add_prism(
+            [x, roof_y + 0.32, cz + sz * 0.02],
+            0.065,
+            0.42,
+            8,
+            [0.20, 0.20, 0.19],
+            MAT_METAL,
+        );
+        mesh.add_box(
+            [x, roof_y + 0.56, cz + sz * 0.02],
+            [0.24, 0.10, 0.24],
+            [0.18, 0.18, 0.17],
+            MAT_METAL,
+        );
+    }
+    if seed % 2 == 0 {
+        for i in 0..5 {
+            mesh.add_box(
+                [
+                    cx - sx * 0.40 + i as f32 * sx * 0.20,
+                    roof_y + 0.52,
+                    cz + sz * 0.48,
+                ],
+                [0.08, 0.08, 0.08],
+                [1.0, 0.55, 0.22],
+                MAT_EMISSIVE_WINDOW,
+            );
+        }
+    }
+}
+
+fn build_rooftop_foreground(mesh: &mut Mesh) {
+    let specs = [
+        (-8.2, 7.6, 10.0, 4.6, 4.2, 4.0),
+        (-2.8, 6.4, 12.6, 5.6, 3.7, 3.1),
+        (3.9, 7.2, 10.8, 5.2, 4.6, 3.7),
+        (9.3, 6.6, 8.4, 4.3, 4.0, 3.3),
+        (-11.0, 5.8, 4.6, 3.7, 4.8, 3.0),
+        (-5.0, 5.2, 5.6, 5.0, 4.5, 2.8),
+        (1.6, 5.9, 5.1, 4.8, 5.0, 3.2),
+        (7.7, 5.3, 3.2, 4.6, 4.1, 2.6),
+        (-9.2, 4.9, -0.4, 4.1, 4.2, 2.5),
+        (-3.0, 4.5, -0.9, 4.8, 3.8, 2.4),
+        (3.3, 4.8, -1.7, 5.0, 4.5, 2.9),
+        (9.6, 4.2, -2.8, 4.5, 4.0, 2.4),
+    ];
+    for (i, (x, h, z, sx, sz, base)) in specs.iter().enumerate() {
+        let mat = if i % 3 == 0 { MAT_BRICK } else { MAT_CONCRETE };
+        let col = if mat == MAT_BRICK {
+            [0.25, 0.12, 0.08]
+        } else {
+            [0.28, 0.26, 0.23]
+        };
+        mesh.add_beveled_box([*x, h * 0.5, *z], [*sx, *h, *sz], 0.035, col, mat);
+        mesh.add_box(
+            [*x, *h + 0.035, *z],
+            [*sx * 0.94, 0.07, *sz * 0.94],
+            [0.035, 0.032, 0.030],
+            MAT_ROOF_TAR,
+        );
+        add_rooftop_kit(mesh, *x, *h + 0.08, *z, *sx * 0.86, *sz * 0.86, i as i32);
+        let bays = 3 + (i as i32 % 3);
+        for b in 0..bays {
+            for f in 0..2 {
+                if (i as i32 + b + f) % 3 == 0 {
+                    add_panel_window(
+                        mesh,
+                        [
+                            *x - *sx * 0.34 + b as f32 * *sx * 0.22,
+                            base + f as f32 * 0.75,
+                            *z + *sz * 0.51,
+                        ],
+                        [0.28, 0.24, 0.035],
+                        (i + b as usize) % 4 == 0,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn build_midground_blocks(mesh: &mut Mesh) {
+    let kinds = [
+        FacadeKind::OldApartment,
+        FacadeKind::MixedUse,
+        FacadeKind::GlassOffice,
+        FacadeKind::LowShop,
+        FacadeKind::Corner,
+        FacadeKind::Tower,
+    ];
+    for row in 0..5 {
+        for col in 0..9 {
+            let seed = row * 37 + col * 19;
+            let x = -21.0 + col as f32 * 5.2 + ((seed % 5) as f32 - 2.0) * 0.45;
+            let z = -8.0 - row as f32 * 7.2 + ((seed % 7) as f32 - 3.0) * 0.35;
+            let sx = 2.5 + (seed % 4) as f32 * 0.55;
+            let sz = 2.3 + ((seed / 3) % 4) as f32 * 0.50;
+            let h = 2.6 + (seed % 9) as f32 * 0.70 + if col % 5 == 0 { 2.8 } else { 0.0 };
+            build_building(
+                mesh,
+                [x, 0.0, z],
+                [sx, h, sz],
+                kinds[(seed as usize) % kinds.len()],
+                seed as i32,
+            );
+            mesh.add_box(
+                [x, h + 0.04, z],
+                [sx * 0.86, 0.06, sz * 0.86],
+                [0.04, 0.038, 0.035],
+                MAT_ROOF_TAR,
+            );
+            if row < 3 {
+                add_rooftop_kit(mesh, x, h + 0.05, z, sx * 0.72, sz * 0.72, seed as i32);
+            }
+        }
+    }
+    for i in 0..11 {
+        let x = -24.0 + i as f32 * 4.8;
+        mesh.add_box(
+            [x, 0.015, -20.0 - (i % 3) as f32 * 5.5],
+            [3.0, 0.03, 18.0],
+            [0.018, 0.018, 0.017],
+            MAT_ASPHALT,
+        );
+    }
+}
+
+fn build_background_skyline(mesh: &mut Mesh) {
+    for i in 0..44 {
+        let x = -44.0 + i as f32 * 2.05;
+        let h = 5.5
+            + ((i * 13) % 17) as f32 * 0.75
+            + if i == 34 {
+                13.0
+            } else if i == 22 {
+                7.0
+            } else {
+                0.0
+            };
+        let w = 1.0 + ((i * 7) % 5) as f32 * 0.28;
+        let z = -56.0 - ((i * 5) % 9) as f32 * 1.5;
+        let mat = if i % 4 == 0 {
+            MAT_CURTAIN_WALL
+        } else {
+            MAT_CONCRETE
+        };
+        let col = if mat == MAT_CURTAIN_WALL {
+            [0.035, 0.060, 0.085]
+        } else {
+            [0.12, 0.10, 0.095]
+        };
+        mesh.add_box([x, h * 0.5, z], [w, h, 1.1], col, mat);
+        if i == 34 {
+            mesh.add_prism(
+                [x, h + 2.2, z],
+                0.05,
+                4.2,
+                8,
+                [0.75, 0.50, 0.25],
+                MAT_EMISSIVE_WINDOW,
+            );
+        }
+        if i == 22 {
+            mesh.add_beveled_box(
+                [x, h + 0.9, z],
+                [w * 0.55, 1.8, 0.7],
+                0.02,
+                [0.08, 0.08, 0.09],
+                MAT_METAL,
+            );
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn build_hero_street_mesh() -> Mesh {
     let mut mesh = Mesh::new();
     mesh.add_box(
         [0.0, -0.08, 0.0],
@@ -1547,6 +1810,27 @@ fn build_city_mesh() -> Mesh {
     mesh
 }
 
+fn build_rooftop_vista_mesh() -> Mesh {
+    let mut mesh = Mesh::new();
+    mesh.add_box(
+        [0.0, -0.08, -18.0],
+        [86.0, 0.16, 110.0],
+        [0.055, 0.055, 0.052],
+        MAT_CONCRETE,
+    );
+    build_rooftop_foreground(&mut mesh);
+    build_midground_blocks(&mut mesh);
+    build_background_skyline(&mut mesh);
+    mesh
+}
+
+fn build_city_mesh() -> Mesh {
+    match option_env!("WEBGPU_CITY_CAMERA") {
+        Some("hero") | Some("street") => build_hero_street_mesh(),
+        _ => build_rooftop_vista_mesh(),
+    }
+}
+
 #[derive(Default)]
 struct App {
     state: Rc<RefCell<Option<State>>>,
@@ -1676,7 +1960,7 @@ mod tests {
             mesh.vertices.len(),
             mesh.indices.len()
         );
-        assert!(mesh.vertices.len() < 80_000);
-        assert!(mesh.indices.len() < 120_000);
+        assert!(mesh.vertices.len() < 120_000);
+        assert!(mesh.indices.len() < 180_000);
     }
 }
