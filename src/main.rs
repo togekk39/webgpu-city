@@ -457,6 +457,9 @@ impl ApplicationHandler for App {
             let state = Rc::clone(&self.state);
             wasm_bindgen_futures::spawn_local(async move {
                 *state.borrow_mut() = Some(State::new(window).await);
+                if let Some(state) = state.borrow().as_ref() {
+                    state.window.request_redraw();
+                }
             });
         }
     }
