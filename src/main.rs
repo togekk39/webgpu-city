@@ -1141,7 +1141,7 @@ impl CameraController {
     const ROTATION_SENSITIVITY: f32 = 0.003;
     const PAN_SENSITIVITY: f32 = 0.018;
     const MIN_CAMERA_Y: f32 = 0.25;
-    const MIN_PITCH: f32 = 0.0;
+    const MIN_PITCH: f32 = -0.35;
     const MAX_PITCH: f32 = 0.85;
 
     fn new() -> Self {
@@ -1189,8 +1189,13 @@ impl CameraController {
     fn matrix(&self, width: u32, height: u32, time: f32) -> (Matrix4<f32>, Point3<f32>) {
         let aspect = width as f32 / height as f32;
         let (base_eye, base_target) = camera_base_pose(time);
-        let target = base_target + self.pan;
-        let eye = self.eye_for_target_from(base_eye, base_target) + self.pan;
+        let mut target = base_target + self.pan;
+        let mut eye = self.eye_for_target_from(base_eye, base_target) + self.pan;
+        if eye.y < Self::MIN_CAMERA_Y {
+            let correction = Self::MIN_CAMERA_Y - eye.y;
+            eye.y += correction;
+            target.y += correction;
+        }
         let view = Matrix4::look_at_rh(eye, target, Vector3::unit_y());
         let proj = perspective(Deg(camera_fov()), aspect, 0.1, 220.0);
         (proj * view, eye)
@@ -1220,11 +1225,9 @@ impl CameraController {
     fn clamp_pan_to_horizon(&mut self) {
         let (_, base_target) = camera_base_pose(0.0);
         let eye = self.eye_for_target(base_target) + self.pan;
-        let target = base_target + self.pan;
-        let min_y = eye.y.min(target.y);
 
-        if min_y < Self::MIN_CAMERA_Y {
-            self.pan.y += Self::MIN_CAMERA_Y - min_y;
+        if eye.y < Self::MIN_CAMERA_Y {
+            self.pan.y += Self::MIN_CAMERA_Y - eye.y;
         }
     }
 }
