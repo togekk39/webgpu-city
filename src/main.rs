@@ -46,6 +46,9 @@ fn sync_canvas_to_viewport(window: &Window) -> PhysicalSize<u32> {
 struct Vertex {
     position: [f32; 3],
     color: [f32; 3],
+    normal: [f32; 3],
+    uv: [f32; 2],
+    material_id: f32,
 }
 
 impl Vertex {
@@ -64,6 +67,21 @@ impl Vertex {
                     shader_location: 1,
                     format: wgpu::VertexFormat::Float32x3,
                 },
+                wgpu::VertexAttribute {
+                    offset: 24,
+                    shader_location: 2,
+                    format: wgpu::VertexFormat::Float32x3,
+                },
+                wgpu::VertexAttribute {
+                    offset: 36,
+                    shader_location: 3,
+                    format: wgpu::VertexFormat::Float32x2,
+                },
+                wgpu::VertexAttribute {
+                    offset: 44,
+                    shader_location: 4,
+                    format: wgpu::VertexFormat::Float32,
+                },
             ],
         }
     }
@@ -73,14 +91,28 @@ impl Vertex {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     view_proj: [[f32; 4]; 4],
-    light_dir: [f32; 4],
+    inv_view_proj: [[f32; 4]; 4],
+    camera_position: [f32; 4],
+    sun_direction: [f32; 4],
+    sun_color: [f32; 4],
+    sky_color: [f32; 4],
+    horizon_color: [f32; 4],
+    ambient_color: [f32; 4],
+    settings: [f32; 4],
 }
 
 impl Uniforms {
     fn new() -> Self {
         Self {
             view_proj: Matrix4::identity().into(),
-            light_dir: [0.45, 0.85, 0.25, 0.0],
+            inv_view_proj: Matrix4::identity().into(),
+            camera_position: [0.0, 0.0, 0.0, 1.0],
+            sun_direction: [-0.92, 0.16, -0.36, 0.0],
+            sun_color: [1.0, 0.55, 0.20, 1.0],
+            sky_color: [0.08, 0.13, 0.23, 1.0],
+            horizon_color: [1.0, 0.42, 0.12, 1.0],
+            ambient_color: [0.12, 0.17, 0.26, 1.0],
+            settings: [0.0, 1.08, 0.032, 1.0],
         }
     }
 }
@@ -98,45 +130,90 @@ impl Mesh {
         }
     }
 
-    fn add_box(&mut self, center: [f32; 3], size: [f32; 3], color: [f32; 3]) {
+    fn add_box(&mut self, center: [f32; 3], size: [f32; 3], color: [f32; 3], material_id: f32) {
         let [cx, cy, cz] = center;
-        let [sx, sy, sz] = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
-        let base = self.vertices.len() as u32;
-        let corners = [
-            [cx - sx, cy - sy, cz + sz],
-            [cx + sx, cy - sy, cz + sz],
-            [cx + sx, cy + sy, cz + sz],
-            [cx - sx, cy + sy, cz + sz],
-            [cx + sx, cy - sy, cz - sz],
-            [cx - sx, cy - sy, cz - sz],
-            [cx - sx, cy + sy, cz - sz],
-            [cx + sx, cy + sy, cz - sz],
-            [cx - sx, cy - sy, cz - sz],
-            [cx - sx, cy - sy, cz + sz],
-            [cx - sx, cy + sy, cz + sz],
-            [cx - sx, cy + sy, cz - sz],
-            [cx + sx, cy - sy, cz + sz],
-            [cx + sx, cy - sy, cz - sz],
-            [cx + sx, cy + sy, cz - sz],
-            [cx + sx, cy + sy, cz + sz],
-            [cx - sx, cy + sy, cz + sz],
-            [cx + sx, cy + sy, cz + sz],
-            [cx + sx, cy + sy, cz - sz],
-            [cx - sx, cy + sy, cz - sz],
-            [cx - sx, cy - sy, cz - sz],
-            [cx + sx, cy - sy, cz - sz],
-            [cx + sx, cy - sy, cz + sz],
-            [cx - sx, cy - sy, cz + sz],
+        let [hx, hy, hz] = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
+        let faces = [
+            (
+                [
+                    [cx - hx, cy - hy, cz + hz],
+                    [cx + hx, cy - hy, cz + hz],
+                    [cx + hx, cy + hy, cz + hz],
+                    [cx - hx, cy + hy, cz + hz],
+                ],
+                [0.0, 0.0, 1.0],
+                [size[0], size[1]],
+            ),
+            (
+                [
+                    [cx + hx, cy - hy, cz - hz],
+                    [cx - hx, cy - hy, cz - hz],
+                    [cx - hx, cy + hy, cz - hz],
+                    [cx + hx, cy + hy, cz - hz],
+                ],
+                [0.0, 0.0, -1.0],
+                [size[0], size[1]],
+            ),
+            (
+                [
+                    [cx - hx, cy - hy, cz - hz],
+                    [cx - hx, cy - hy, cz + hz],
+                    [cx - hx, cy + hy, cz + hz],
+                    [cx - hx, cy + hy, cz - hz],
+                ],
+                [-1.0, 0.0, 0.0],
+                [size[2], size[1]],
+            ),
+            (
+                [
+                    [cx + hx, cy - hy, cz + hz],
+                    [cx + hx, cy - hy, cz - hz],
+                    [cx + hx, cy + hy, cz - hz],
+                    [cx + hx, cy + hy, cz + hz],
+                ],
+                [1.0, 0.0, 0.0],
+                [size[2], size[1]],
+            ),
+            (
+                [
+                    [cx - hx, cy + hy, cz + hz],
+                    [cx + hx, cy + hy, cz + hz],
+                    [cx + hx, cy + hy, cz - hz],
+                    [cx - hx, cy + hy, cz - hz],
+                ],
+                [0.0, 1.0, 0.0],
+                [size[0], size[2]],
+            ),
+            (
+                [
+                    [cx - hx, cy - hy, cz - hz],
+                    [cx + hx, cy - hy, cz - hz],
+                    [cx + hx, cy - hy, cz + hz],
+                    [cx - hx, cy - hy, cz + hz],
+                ],
+                [0.0, -1.0, 0.0],
+                [size[0], size[2]],
+            ),
         ];
-        self.vertices.extend(
-            corners
-                .into_iter()
-                .map(|position| Vertex { position, color }),
-        );
-        for face in 0..6 {
-            let o = base + face * 4;
+        for (corners, normal, uv_scale) in faces {
+            let base = self.vertices.len() as u32;
+            let uvs = [
+                [0.0, 0.0],
+                [uv_scale[0], 0.0],
+                [uv_scale[0], uv_scale[1]],
+                [0.0, uv_scale[1]],
+            ];
+            for i in 0..4 {
+                self.vertices.push(Vertex {
+                    position: corners[i],
+                    color,
+                    normal,
+                    uv: uvs[i],
+                    material_id,
+                });
+            }
             self.indices
-                .extend_from_slice(&[o, o + 1, o + 2, o, o + 2, o + 3]);
+                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
 }
@@ -165,6 +242,65 @@ impl DepthTexture {
         });
         Self {
             view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            format,
+        }
+    }
+}
+
+struct HdrTarget {
+    view: wgpu::TextureView,
+    _sampler: wgpu::Sampler,
+    bind_group: wgpu::BindGroup,
+    format: wgpu::TextureFormat,
+}
+
+impl HdrTarget {
+    fn create(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        layout: &wgpu::BindGroupLayout,
+    ) -> Self {
+        let format = wgpu::TextureFormat::Rgba16Float;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("cinematic hdr scene target"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("hdr post sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("post bind group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        Self {
+            view,
+            _sampler: sampler,
+            bind_group,
             format,
         }
     }
@@ -223,6 +359,9 @@ struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     render_pipeline: wgpu::RenderPipeline,
+    post_pipeline: wgpu::RenderPipeline,
+    post_layout: wgpu::BindGroupLayout,
+    hdr: HdrTarget,
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
@@ -276,6 +415,11 @@ impl State {
         surface.configure(&device, &config);
 
         let mesh = build_city_mesh();
+        eprintln!(
+            "city stats: vertices={} indices={} draw_calls=2 render_scale=1.0 postprocess=bloom+vignette+filmic",
+            mesh.vertices.len(),
+            mesh.indices.len()
+        );
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("city vertices"),
             contents: bytemuck::cast_slice(&mesh.vertices),
@@ -287,7 +431,13 @@ impl State {
             usage: wgpu::BufferUsages::INDEX,
         });
         let mut uniforms = Uniforms::new();
-        uniforms.view_proj = camera_matrix(config.width, config.height, 0.0).into();
+        let (initial_view_proj, initial_eye) = camera_matrix(config.width, config.height, 0.0);
+        uniforms.view_proj = initial_view_proj.into();
+        uniforms.inv_view_proj = initial_view_proj
+            .invert()
+            .unwrap_or_else(Matrix4::identity)
+            .into();
+        uniforms.camera_position = [initial_eye.x, initial_eye.y, initial_eye.z, 1.0];
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera uniforms"),
             contents: bytemuck::bytes_of(&uniforms),
@@ -315,6 +465,28 @@ impl State {
             }],
         });
         let depth = DepthTexture::create(&device, &config);
+        let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("post texture layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let hdr = HdrTarget::create(&device, config.width, config.height, &post_layout);
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("city pipeline layout"),
@@ -334,7 +506,7 @@ impl State {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format,
+                    format: hdr.format,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -355,6 +527,36 @@ impl State {
             multiview_mask: None,
             cache: None,
         });
+        let post_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("post pipeline layout"),
+            bind_group_layouts: &[Some(&uniform_layout), Some(&post_layout)],
+            immediate_size: 0,
+        });
+        let post_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("tone map and bloom post pipeline"),
+            layout: Some(&post_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_fullscreen"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_post"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
             window,
             surface,
@@ -362,6 +564,9 @@ impl State {
             queue,
             config,
             render_pipeline,
+            post_pipeline,
+            post_layout,
+            hdr,
             vertex_buffer,
             index_buffer,
             num_indices: mesh.indices.len() as u32,
@@ -380,14 +585,22 @@ impl State {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.depth = DepthTexture::create(&self.device, &self.config);
+        self.hdr = HdrTarget::create(
+            &self.device,
+            self.config.width,
+            self.config.height,
+            &self.post_layout,
+        );
     }
 
     fn update(&self) {
         let elapsed = self.clock.elapsed_secs();
-        let uniforms = Uniforms {
-            view_proj: camera_matrix(self.config.width, self.config.height, elapsed * 0.18).into(),
-            light_dir: [0.45, 0.85, 0.25, 0.0],
-        };
+        let (view_proj, eye) = camera_matrix(self.config.width, self.config.height, elapsed);
+        let mut uniforms = Uniforms::new();
+        uniforms.view_proj = view_proj.into();
+        uniforms.inv_view_proj = view_proj.invert().unwrap_or_else(Matrix4::identity).into();
+        uniforms.camera_position = [eye.x, eye.y, eye.z, 1.0];
+        uniforms.settings[0] = elapsed;
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
@@ -415,14 +628,14 @@ impl State {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("city render pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.hdr.view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.03,
-                            g: 0.05,
-                            b: 0.09,
+                            r: 0.95,
+                            g: 0.34,
+                            b: 0.12,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -446,177 +659,291 @@ impl State {
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.num_indices, 0, 0..1);
         }
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("postprocess render pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.post_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &self.hdr.bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
         RenderOutcome::Presented
     }
 }
 
-fn camera_matrix(width: u32, height: u32, angle: f32) -> Matrix4<f32> {
-    let aspect = width as f32 / height as f32;
-    let eye = Point3::new(angle.sin() * 26.0, 15.0, angle.cos() * 26.0);
-    let view = Matrix4::look_at_rh(eye, Point3::new(0.0, 2.5, 0.0), Vector3::unit_y());
-    let proj = perspective(Deg(45.0), aspect, 0.1, 100.0);
-    proj * view
+#[derive(Clone, Copy)]
+enum CameraMode {
+    CinematicOrbit,
+    HeroStreet,
 }
 
-fn build_detailed_building(
-    mesh: &mut Mesh,
-    center: [f32; 3],
-    size: [f32; 3],
-    body_color: [f32; 3],
-    accent: [f32; 3],
-    seed: i32,
-) {
+fn camera_matrix(width: u32, height: u32, time: f32) -> (Matrix4<f32>, Point3<f32>) {
+    let aspect = width as f32 / height as f32;
+    let mode = if option_env!("WEBGPU_CITY_CAMERA") == Some("orbit") {
+        CameraMode::CinematicOrbit
+    } else {
+        CameraMode::HeroStreet
+    };
+    let (eye, target) = match mode {
+        CameraMode::HeroStreet => (Point3::new(5.8, 7.0, 18.5), Point3::new(-0.55, 2.2, -11.0)),
+        CameraMode::CinematicOrbit => {
+            let angle = time * 0.055;
+            let eye = Point3::new(
+                angle.sin() * 24.0,
+                10.5 + (time * 0.2).sin() * 0.8,
+                angle.cos() * 24.0,
+            );
+            (eye, Point3::new(0.0, 2.8 + (time * 0.13).cos() * 0.5, 0.0))
+        }
+    };
+    let view = Matrix4::look_at_rh(eye, target, Vector3::unit_y());
+    let proj = perspective(Deg(50.0), aspect, 0.1, 140.0);
+    (proj * view, eye)
+}
+
+const MAT_ASPHALT: f32 = 0.0;
+const MAT_CONCRETE: f32 = 1.0;
+const MAT_BRICK: f32 = 2.0;
+const MAT_GLASS: f32 = 3.0;
+const MAT_EMISSIVE: f32 = 4.0;
+const MAT_METAL: f32 = 5.0;
+const MAT_MARKING: f32 = 6.0;
+const MAT_FOLIAGE: f32 = 7.0;
+
+#[derive(Clone, Copy)]
+enum FacadeKind {
+    OldApartment,
+    GlassOffice,
+    MixedUse,
+    LowShop,
+    Corner,
+    Tower,
+}
+
+fn facade_color(kind: FacadeKind, seed: i32) -> ([f32; 3], f32) {
+    let wobble = ((seed * 37).rem_euclid(17) as f32) * 0.006;
+    match kind {
+        FacadeKind::OldApartment => ([0.34 + wobble, 0.18 + wobble, 0.12 + wobble], MAT_BRICK),
+        FacadeKind::GlassOffice => ([0.07, 0.13 + wobble, 0.18 + wobble], MAT_GLASS),
+        FacadeKind::MixedUse => ([0.30 + wobble, 0.26 + wobble, 0.21 + wobble], MAT_CONCRETE),
+        FacadeKind::LowShop => ([0.45 + wobble, 0.36 + wobble, 0.26 + wobble], MAT_CONCRETE),
+        FacadeKind::Corner => ([0.22 + wobble, 0.16 + wobble, 0.14 + wobble], MAT_BRICK),
+        FacadeKind::Tower => ([0.10, 0.16 + wobble, 0.25 + wobble], MAT_GLASS),
+    }
+}
+
+fn build_building(mesh: &mut Mesh, center: [f32; 3], size: [f32; 3], kind: FacadeKind, seed: i32) {
     let [cx, _, cz] = center;
     let [sx, height, sz] = size;
-    mesh.add_box([cx, height * 0.5, cz], [sx, height, sz], body_color);
+    let (color, mat) = facade_color(kind, seed);
+    mesh.add_box([cx, height * 0.5, cz], [sx, height, sz], color, mat);
 
-    let floor_count = (height / 0.55).floor().max(2.0) as i32;
-    let window_color = [0.95, 0.74, 0.32];
-    let dark_glass = [0.035, 0.075, 0.12];
-    let trim = [
-        (body_color[0] + 0.18).min(0.75),
-        (body_color[1] + 0.18).min(0.78),
-        (body_color[2] + 0.18).min(0.82),
-    ];
-
-    for floor in 0..floor_count {
-        let y = 0.42 + floor as f32 * 0.55;
-        let lit = (floor + seed).rem_euclid(4) != 0;
-        let glass = if lit { window_color } else { dark_glass };
-        let window_h = 0.24;
-
-        for side in 0..4 {
-            let along = if side < 2 { sx } else { sz };
-            let slots = (along / 0.45).floor().max(2.0) as i32;
-            for slot in 0..slots {
-                if (slot + floor + seed + side).rem_euclid(5) == 0 {
-                    continue;
-                }
-                let offset = (slot as f32 + 0.5) / slots as f32 - 0.5;
-                let span = along * offset * 0.72;
-                match side {
-                    0 => mesh.add_box(
-                        [cx + span, y, cz + sz * 0.505],
-                        [0.20, window_h, 0.035],
-                        glass,
-                    ),
-                    1 => mesh.add_box(
-                        [cx + span, y, cz - sz * 0.505],
-                        [0.20, window_h, 0.035],
-                        glass,
-                    ),
-                    2 => mesh.add_box(
-                        [cx + sx * 0.505, y, cz + span],
-                        [0.035, window_h, 0.20],
-                        glass,
-                    ),
-                    _ => mesh.add_box(
-                        [cx - sx * 0.505, y, cz + span],
-                        [0.035, window_h, 0.20],
-                        glass,
-                    ),
-                }
-            }
-        }
-
-        if floor % 3 == 0 {
-            mesh.add_box(
-                [cx, y + 0.22, cz + sz * 0.512],
-                [sx * 0.92, 0.035, 0.025],
-                trim,
-            );
-            mesh.add_box(
-                [cx, y + 0.22, cz - sz * 0.512],
-                [sx * 0.92, 0.035, 0.025],
-                trim,
-            );
-            mesh.add_box(
-                [cx + sx * 0.512, y + 0.22, cz],
-                [0.025, 0.035, sz * 0.92],
-                trim,
-            );
-            mesh.add_box(
-                [cx - sx * 0.512, y + 0.22, cz],
-                [0.025, 0.035, sz * 0.92],
-                trim,
-            );
-        }
+    // Setbacks and roof silhouettes keep the skyline irregular without per-window cubes.
+    if height > 5.0 {
+        mesh.add_box(
+            [cx + sx * 0.08, height + 0.45, cz - sz * 0.06],
+            [sx * 0.58, 0.9, sz * 0.55],
+            color,
+            mat,
+        );
     }
+    mesh.add_box(
+        [cx, height + 0.08, cz],
+        [sx * 1.05, 0.16, sz * 1.05],
+        [0.22, 0.24, 0.23],
+        MAT_METAL,
+    );
+    mesh.add_box(
+        [cx - sx * 0.25, height + 0.34, cz + sz * 0.22],
+        [0.16, 0.36, 0.16],
+        [0.42, 0.45, 0.44],
+        MAT_METAL,
+    );
+    if seed.rem_euclid(3) == 0 {
+        mesh.add_box(
+            [cx + sx * 0.24, height + 0.25, cz - sz * 0.18],
+            [0.42, 0.20, 0.30],
+            [0.31, 0.36, 0.38],
+            MAT_METAL,
+        );
+    }
+    if matches!(
+        kind,
+        FacadeKind::MixedUse | FacadeKind::LowShop | FacadeKind::Corner
+    ) {
+        mesh.add_box(
+            [cx, 0.75, cz + sz * 0.515],
+            [sx * 0.72, 0.42, 0.035],
+            [1.0, 0.46, 0.16],
+            MAT_EMISSIVE,
+        );
+        mesh.add_box(
+            [cx, 1.10, cz + sz * 0.525],
+            [sx * 0.82, 0.08, 0.16],
+            [0.18, 0.05, 0.035],
+            MAT_METAL,
+        );
+    }
+}
 
-    mesh.add_box([cx, height + 0.06, cz], [sx * 1.08, 0.12, sz * 1.08], trim);
+fn build_streetlight(mesh: &mut Mesh, x: f32, z: f32) {
     mesh.add_box(
-        [cx, height + 0.28, cz],
-        [sx * 0.62, 0.32, sz * 0.58],
-        accent,
+        [x, 0.8, z],
+        [0.06, 1.6, 0.06],
+        [0.18, 0.16, 0.14],
+        MAT_METAL,
     );
     mesh.add_box(
-        [cx - sx * 0.22, height + 0.58, cz + sz * 0.16],
-        [0.08, 0.48, 0.08],
-        [0.7, 0.74, 0.72],
+        [x, 1.62, z - 0.18],
+        [0.08, 0.08, 0.34],
+        [0.18, 0.16, 0.14],
+        MAT_METAL,
     );
     mesh.add_box(
-        [cx + sx * 0.18, height + 0.5, cz - sz * 0.18],
-        [0.26, 0.18, 0.26],
-        [0.42, 0.48, 0.50],
+        [x, 1.58, z - 0.38],
+        [0.16, 0.10, 0.10],
+        [1.0, 0.62, 0.28],
+        MAT_EMISSIVE,
     );
 }
 
 fn build_city_mesh() -> Mesh {
     let mut mesh = Mesh::new();
-    mesh.add_box([0.0, -0.08, 0.0], [38.0, 0.16, 38.0], [0.07, 0.10, 0.12]);
-    for road in [-8.0, 0.0, 8.0] {
-        mesh.add_box([road, 0.01, 0.0], [1.2, 0.04, 36.0], [0.015, 0.017, 0.019]);
-        mesh.add_box([0.0, 0.02, road], [36.0, 0.04, 1.2], [0.015, 0.017, 0.019]);
+    mesh.add_box(
+        [0.0, -0.08, 0.0],
+        [42.0, 0.16, 46.0],
+        [0.08, 0.09, 0.09],
+        MAT_CONCRETE,
+    );
+    mesh.add_box(
+        [0.0, 0.01, 0.0],
+        [4.2, 0.05, 42.0],
+        [0.018, 0.018, 0.017],
+        MAT_ASPHALT,
+    );
+    for x in [-1.05, 1.05] {
         mesh.add_box(
-            [road - 0.62, 0.045, 0.0],
-            [0.05, 0.04, 36.0],
-            [0.42, 0.36, 0.22],
-        );
-        mesh.add_box(
-            [0.0, 0.05, road + 0.62],
-            [36.0, 0.04, 0.05],
-            [0.42, 0.36, 0.22],
+            [x, 0.055, 0.0],
+            [0.08, 0.035, 38.0],
+            [0.82, 0.72, 0.50],
+            MAT_MARKING,
         );
     }
-    for x in -5i32..=5 {
-        for z in -5i32..=5 {
-            if x % 3 == 0 || z % 3 == 0 {
-                continue;
-            }
-            let xf = x as f32 * 3.0;
-            let zf = z as f32 * 3.0;
-            let height = 1.8 + ((x * x + z * z + 7) % 9) as f32 * 0.62;
-            let color = [
-                0.10 + height * 0.018,
-                0.15 + (x.abs() as f32) * 0.012,
-                0.22 + (z.abs() as f32) * 0.014,
-            ];
-            let footprint = [
-                1.55 + (x.abs() % 2) as f32 * 0.28,
-                height,
-                1.55 + (z.abs() % 2) as f32 * 0.28,
-            ];
-            build_detailed_building(
+    for z in (-18..=18).step_by(4) {
+        mesh.add_box(
+            [0.0, 0.06, z as f32],
+            [0.14, 0.035, 1.35],
+            [0.85, 0.76, 0.55],
+            MAT_MARKING,
+        );
+    }
+    for z in [-12.0, 0.0, 12.0] {
+        mesh.add_box(
+            [0.0, 0.07, z],
+            [4.4, 0.04, 0.12],
+            [0.90, 0.86, 0.76],
+            MAT_MARKING,
+        );
+        mesh.add_box(
+            [0.0, 0.01, z],
+            [38.0, 0.04, 1.7],
+            [0.019, 0.019, 0.018],
+            MAT_ASPHALT,
+        );
+    }
+    for x in [-3.0, 3.0] {
+        mesh.add_box(
+            [x, 0.04, 0.0],
+            [1.15, 0.08, 42.0],
+            [0.24, 0.23, 0.21],
+            MAT_CONCRETE,
+        );
+    }
+
+    let kinds = [
+        FacadeKind::OldApartment,
+        FacadeKind::GlassOffice,
+        FacadeKind::MixedUse,
+        FacadeKind::LowShop,
+        FacadeKind::Corner,
+        FacadeKind::Tower,
+    ];
+    for side in [-1.0, 1.0] {
+        for i in 0..12 {
+            let z = -18.0 + i as f32 * 3.3;
+            let near = 1.0 - (z.abs() / 22.0).min(0.75);
+            let h =
+                2.2 + ((i * 7 + if side > 0.0 { 3 } else { 9 }) % 10) as f32 * 0.72 + near * 3.3;
+            let w = 1.7 + (i % 3) as f32 * 0.32;
+            let d = 1.8 + ((i + 1) % 3) as f32 * 0.28;
+            let x = side * (4.15 + d * 0.5);
+            build_building(
                 &mut mesh,
-                [xf, 0.0, zf],
-                footprint,
-                color,
-                [0.50, 0.56, 0.60],
-                x * 31 + z * 17,
+                [x, 0.0, z],
+                [w, h, d],
+                kinds[(i as usize + if side > 0.0 { 0 } else { 2 }) % kinds.len()],
+                i as i32 + if side > 0.0 { 10 } else { 40 },
             );
         }
     }
-    build_detailed_building(
-        &mut mesh,
-        [0.0, 0.0, 0.0],
-        [3.0, 7.2, 3.0],
-        [0.15, 0.24, 0.43],
-        [0.90, 0.72, 0.34],
-        91,
-    );
-    mesh.add_box([0.0, 7.75, 0.0], [0.16, 0.8, 0.16], [1.0, 0.86, 0.42]);
+    for x in [-14.0, -10.0, -7.0, 7.0, 11.0, 15.0] {
+        for z in [-14.0, -8.0, 6.0, 13.0] {
+            let seed = (x as i32 * 13 + z as i32 * 7).abs();
+            let h = 2.4 + (seed % 8) as f32 * 0.65;
+            build_building(
+                &mut mesh,
+                [x, 0.0, z],
+                [2.2, h, 2.0],
+                kinds[seed as usize % kinds.len()],
+                seed,
+            );
+        }
+    }
+    for z in (-16..=18).step_by(4) {
+        build_streetlight(&mut mesh, -2.35, z as f32);
+        build_streetlight(&mut mesh, 2.35, z as f32 + 1.4);
+    }
+    // Simple cars and tree masses for scale; not a traffic system.
+    for (x, z, c) in [
+        (-0.8, -8.0, [0.08, 0.10, 0.12]),
+        (0.9, -3.0, [0.55, 0.08, 0.05]),
+        (-0.7, 4.0, [0.12, 0.18, 0.30]),
+        (0.8, 10.0, [0.75, 0.72, 0.60]),
+    ] {
+        mesh.add_box([x, 0.20, z], [0.58, 0.28, 1.05], c, MAT_METAL);
+        mesh.add_box(
+            [x, 0.43, z - 0.05],
+            [0.42, 0.22, 0.52],
+            [0.04, 0.06, 0.08],
+            MAT_GLASS,
+        );
+    }
+    for x in [-3.35, 3.35] {
+        for z in (-18..=18).step_by(6) {
+            mesh.add_box(
+                [x, 0.55, z as f32],
+                [0.55, 1.1, 0.55],
+                [0.08, 0.20, 0.10],
+                MAT_FOLIAGE,
+            );
+        }
+    }
     mesh
 }
 
