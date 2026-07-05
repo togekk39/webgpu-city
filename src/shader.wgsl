@@ -150,11 +150,12 @@ fn fs_sky(input: FullOut) -> @location(0) vec4<f32> {
 fn fs_post(input: FullOut) -> @location(0) vec4<f32> {
     let dims = vec2<f32>(textureDimensions(hdr_scene));
     let texel = 1.0 / dims;
-    var color = textureSample(hdr_scene, hdr_sampler, input.uv).rgb;
+    let scene_uv = vec2<f32>(input.uv.x, 1.0 - input.uv.y);
+    var color = textureSample(hdr_scene, hdr_sampler, scene_uv).rgb;
     var bloom = vec3<f32>(0.0);
     for (var x: i32 = -2; x <= 2; x = x + 1) {
         for (var y: i32 = -2; y <= 2; y = y + 1) {
-            let s = textureSample(hdr_scene, hdr_sampler, input.uv + vec2<f32>(f32(x), f32(y)) * texel * 2.0).rgb;
+            let s = textureSample(hdr_scene, hdr_sampler, scene_uv + vec2<f32>(f32(x), f32(y)) * texel * 2.0).rgb;
             bloom += max(s - vec3<f32>(1.15), vec3<f32>(0.0)) / 25.0;
         }
     }
