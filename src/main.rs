@@ -460,12 +460,125 @@ fn camera_matrix(width: u32, height: u32, angle: f32) -> Matrix4<f32> {
     proj * view
 }
 
+fn build_detailed_building(
+    mesh: &mut Mesh,
+    center: [f32; 3],
+    size: [f32; 3],
+    body_color: [f32; 3],
+    accent: [f32; 3],
+    seed: i32,
+) {
+    let [cx, _, cz] = center;
+    let [sx, height, sz] = size;
+    mesh.add_box([cx, height * 0.5, cz], [sx, height, sz], body_color);
+
+    let floor_count = (height / 0.55).floor().max(2.0) as i32;
+    let window_color = [0.95, 0.74, 0.32];
+    let dark_glass = [0.035, 0.075, 0.12];
+    let trim = [
+        (body_color[0] + 0.18).min(0.75),
+        (body_color[1] + 0.18).min(0.78),
+        (body_color[2] + 0.18).min(0.82),
+    ];
+
+    for floor in 0..floor_count {
+        let y = 0.42 + floor as f32 * 0.55;
+        let lit = (floor + seed).rem_euclid(4) != 0;
+        let glass = if lit { window_color } else { dark_glass };
+        let window_h = 0.24;
+
+        for side in 0..4 {
+            let along = if side < 2 { sx } else { sz };
+            let slots = (along / 0.45).floor().max(2.0) as i32;
+            for slot in 0..slots {
+                if (slot + floor + seed + side).rem_euclid(5) == 0 {
+                    continue;
+                }
+                let offset = (slot as f32 + 0.5) / slots as f32 - 0.5;
+                let span = along * offset * 0.72;
+                match side {
+                    0 => mesh.add_box(
+                        [cx + span, y, cz + sz * 0.505],
+                        [0.20, window_h, 0.035],
+                        glass,
+                    ),
+                    1 => mesh.add_box(
+                        [cx + span, y, cz - sz * 0.505],
+                        [0.20, window_h, 0.035],
+                        glass,
+                    ),
+                    2 => mesh.add_box(
+                        [cx + sx * 0.505, y, cz + span],
+                        [0.035, window_h, 0.20],
+                        glass,
+                    ),
+                    _ => mesh.add_box(
+                        [cx - sx * 0.505, y, cz + span],
+                        [0.035, window_h, 0.20],
+                        glass,
+                    ),
+                }
+            }
+        }
+
+        if floor % 3 == 0 {
+            mesh.add_box(
+                [cx, y + 0.22, cz + sz * 0.512],
+                [sx * 0.92, 0.035, 0.025],
+                trim,
+            );
+            mesh.add_box(
+                [cx, y + 0.22, cz - sz * 0.512],
+                [sx * 0.92, 0.035, 0.025],
+                trim,
+            );
+            mesh.add_box(
+                [cx + sx * 0.512, y + 0.22, cz],
+                [0.025, 0.035, sz * 0.92],
+                trim,
+            );
+            mesh.add_box(
+                [cx - sx * 0.512, y + 0.22, cz],
+                [0.025, 0.035, sz * 0.92],
+                trim,
+            );
+        }
+    }
+
+    mesh.add_box([cx, height + 0.06, cz], [sx * 1.08, 0.12, sz * 1.08], trim);
+    mesh.add_box(
+        [cx, height + 0.28, cz],
+        [sx * 0.62, 0.32, sz * 0.58],
+        accent,
+    );
+    mesh.add_box(
+        [cx - sx * 0.22, height + 0.58, cz + sz * 0.16],
+        [0.08, 0.48, 0.08],
+        [0.7, 0.74, 0.72],
+    );
+    mesh.add_box(
+        [cx + sx * 0.18, height + 0.5, cz - sz * 0.18],
+        [0.26, 0.18, 0.26],
+        [0.42, 0.48, 0.50],
+    );
+}
+
 fn build_city_mesh() -> Mesh {
     let mut mesh = Mesh::new();
     mesh.add_box([0.0, -0.08, 0.0], [38.0, 0.16, 38.0], [0.07, 0.10, 0.12]);
     for road in [-8.0, 0.0, 8.0] {
         mesh.add_box([road, 0.01, 0.0], [1.2, 0.04, 36.0], [0.015, 0.017, 0.019]);
         mesh.add_box([0.0, 0.02, road], [36.0, 0.04, 1.2], [0.015, 0.017, 0.019]);
+        mesh.add_box(
+            [road - 0.62, 0.045, 0.0],
+            [0.05, 0.04, 36.0],
+            [0.42, 0.36, 0.22],
+        );
+        mesh.add_box(
+            [0.0, 0.05, road + 0.62],
+            [36.0, 0.04, 0.05],
+            [0.42, 0.36, 0.22],
+        );
     }
     for x in -5i32..=5 {
         for z in -5i32..=5 {
@@ -474,24 +587,36 @@ fn build_city_mesh() -> Mesh {
             }
             let xf = x as f32 * 3.0;
             let zf = z as f32 * 3.0;
-            let height = 1.2 + ((x * x + z * z + 7) % 8) as f32 * 0.55;
+            let height = 1.8 + ((x * x + z * z + 7) % 9) as f32 * 0.62;
             let color = [
-                0.12 + height * 0.025,
-                0.18 + (x.abs() as f32) * 0.015,
-                0.28 + (z.abs() as f32) * 0.018,
+                0.10 + height * 0.018,
+                0.15 + (x.abs() as f32) * 0.012,
+                0.22 + (z.abs() as f32) * 0.014,
             ];
-            mesh.add_box([xf, height * 0.5, zf], [1.8, height, 1.8], color);
-            if height > 3.5 {
-                mesh.add_box(
-                    [xf, height + 0.08, zf],
-                    [1.3, 0.16, 1.3],
-                    [0.55, 0.65, 0.72],
-                );
-            }
+            let footprint = [
+                1.55 + (x.abs() % 2) as f32 * 0.28,
+                height,
+                1.55 + (z.abs() % 2) as f32 * 0.28,
+            ];
+            build_detailed_building(
+                &mut mesh,
+                [xf, 0.0, zf],
+                footprint,
+                color,
+                [0.50, 0.56, 0.60],
+                x * 31 + z * 17,
+            );
         }
     }
-    mesh.add_box([0.0, 3.2, 0.0], [3.0, 6.4, 3.0], [0.18, 0.27, 0.48]);
-    mesh.add_box([0.0, 6.6, 0.0], [1.8, 0.35, 1.8], [0.90, 0.72, 0.34]);
+    build_detailed_building(
+        &mut mesh,
+        [0.0, 0.0, 0.0],
+        [3.0, 7.2, 3.0],
+        [0.15, 0.24, 0.43],
+        [0.90, 0.72, 0.34],
+        91,
+    );
+    mesh.add_box([0.0, 7.75, 0.0], [0.16, 0.8, 0.16], [1.0, 0.86, 0.42]);
     mesh
 }
 

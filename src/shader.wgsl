@@ -28,10 +28,16 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let glow = smoothstep(2.2, 7.0, input.world_position.y) * 0.28;
+    let world_dx = dpdx(input.world_position);
+    let world_dy = dpdy(input.world_position);
+    let normal = normalize(cross(world_dx, world_dy));
+    let light = normalize(uniforms.light_dir.xyz);
+    let diffuse = clamp(dot(normal, light), 0.0, 1.0);
+    let rim = pow(1.0 - clamp(abs(normal.y), 0.0, 1.0), 2.0) * 0.12;
+    let glow = smoothstep(2.2, 7.8, input.world_position.y) * 0.22;
     let street = 1.0 - smoothstep(0.0, 0.45, input.world_position.y);
     let distance_fog = clamp(length(input.world_position.xz) / 28.0, 0.0, 1.0);
-    let lit = input.color + vec3<f32>(glow, glow * 0.78, glow * 0.35) + vec3<f32>(street * 0.03, street * 0.025, street * 0.018);
+    let lit = input.color * (0.48 + diffuse * 0.52) + vec3<f32>(glow + rim, glow * 0.78, glow * 0.35) + vec3<f32>(street * 0.035, street * 0.03, street * 0.02);
     let sky_tint = vec3<f32>(0.04, 0.06, 0.10);
-    return vec4<f32>(mix(lit, sky_tint, distance_fog * 0.35), 1.0);
+    return vec4<f32>(mix(lit, sky_tint, distance_fog * 0.32), 1.0);
 }
