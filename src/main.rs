@@ -8,7 +8,7 @@ use winit::dpi::PhysicalSize;
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalPosition,
-    event::{ElementState, MouseButton, WindowEvent},
+    event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, EventLoop},
     window::{Window, WindowId},
 };
@@ -117,7 +117,7 @@ impl Uniforms {
             horizon_color: [1.0, 0.47, 0.15, 1.0],
             ambient_color: [0.095, 0.13, 0.22, 1.0],
             settings: [0.0, 1.12, 0.034, 1.0],
-            sunset: [5.5_f32.to_radians(), 220.0_f32.to_radians(), 0.0105, 1.25],
+            sunset: [2.0_f32.to_radians(), 220.0_f32.to_radians(), 0.0105, 1.25],
         }
     }
 }
@@ -981,6 +981,10 @@ impl State {
         self.camera.handle_mouse_input(button, state);
     }
 
+    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        self.camera.handle_mouse_wheel(delta);
+    }
+
     fn render(&mut self) -> RenderOutcome {
         self.update();
         let frame = match self.surface.get_current_texture() {
@@ -1133,6 +1137,7 @@ struct CameraController {
     yaw_offset: f32,
     pitch_offset: f32,
     pan: Vector3<f32>,
+    zoom: f32,
     last_cursor: Option<PhysicalPosition<f64>>,
     left_dragging: bool,
 }
@@ -1143,12 +1148,16 @@ impl CameraController {
     const MIN_CAMERA_Y: f32 = 0.25;
     const MIN_PITCH: f32 = -0.35;
     const MAX_PITCH: f32 = 0.85;
+    const MIN_ZOOM: f32 = 0.35;
+    const MAX_ZOOM: f32 = 2.4;
+    const WHEEL_ZOOM_SENSITIVITY: f32 = 0.11;
 
     fn new() -> Self {
         Self {
             yaw_offset: 0.0,
             pitch_offset: 0.0,
             pan: Vector3::new(0.0, 0.0, 0.0),
+            zoom: 1.0,
             last_cursor: None,
             left_dragging: false,
         }
@@ -1186,6 +1195,15 @@ impl CameraController {
         }
     }
 
+    fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        let scroll_lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => y,
+            MouseScrollDelta::PixelDelta(position) => position.y as f32 / 120.0,
+        };
+        let zoom_factor = (1.0 - scroll_lines * Self::WHEEL_ZOOM_SENSITIVITY).max(0.05);
+        self.zoom = (self.zoom * zoom_factor).clamp(Self::MIN_ZOOM, Self::MAX_ZOOM);
+    }
+
     fn matrix(&self, width: u32, height: u32, time: f32) -> (Matrix4<f32>, Point3<f32>) {
         let aspect = width as f32 / height as f32;
         let (base_eye, base_target) = camera_base_pose(time);
@@ -1208,9 +1226,10 @@ impl CameraController {
 
     fn eye_for_target_from(&self, base_eye: Point3<f32>, base_target: Point3<f32>) -> Point3<f32> {
         let offset = base_eye - base_target;
-        let radius = offset.magnitude();
+        let base_radius = offset.magnitude();
+        let radius = base_radius * self.zoom;
         let base_yaw = offset.x.atan2(offset.z);
-        let base_pitch = (offset.y / radius).asin();
+        let base_pitch = (offset.y / base_radius).asin();
         let yaw = base_yaw + self.yaw_offset;
         let pitch = (base_pitch + self.pitch_offset).clamp(Self::MIN_PITCH, Self::MAX_PITCH);
         let horizontal = radius * pitch.cos();
@@ -1233,7 +1252,7 @@ impl CameraController {
 }
 
 fn sunset_sun_direction() -> Vector3<f32> {
-    let elevation = 5.5_f32.to_radians();
+    let elevation = 2.0_f32.to_radians();
     let azimuth = 220.0_f32.to_radians();
     Vector3::new(
         azimuth.cos() * elevation.cos(),
@@ -2197,6 +2216,7 @@ impl ApplicationHandler for App {
             } => {
                 state.handle_mouse_input(button, input_state);
             }
+            WindowEvent::MouseWheel { delta, .. } => state.handle_mouse_wheel(delta),
             WindowEvent::RedrawRequested => {
                 #[cfg(target_arch = "wasm32")]
                 {
