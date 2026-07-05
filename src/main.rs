@@ -1140,7 +1140,8 @@ struct CameraController {
 impl CameraController {
     const ROTATION_SENSITIVITY: f32 = 0.003;
     const PAN_SENSITIVITY: f32 = 0.018;
-    const MIN_PITCH: f32 = -0.35;
+    const MIN_CAMERA_Y: f32 = 0.25;
+    const MIN_PITCH: f32 = 0.0;
     const MAX_PITCH: f32 = 0.85;
 
     fn new() -> Self {
@@ -1165,6 +1166,7 @@ impl CameraController {
                 let right = forward.cross(Vector3::unit_y()).normalize();
                 self.pan += right * (-delta_x * Self::PAN_SENSITIVITY);
                 self.pan += Vector3::unit_y() * (-delta_y * Self::PAN_SENSITIVITY);
+                self.clamp_pan_to_horizon();
             } else {
                 self.yaw_offset += delta_x * Self::ROTATION_SENSITIVITY;
                 self.pitch_offset = (self.pitch_offset - delta_y * Self::ROTATION_SENSITIVITY)
@@ -1213,6 +1215,17 @@ impl CameraController {
             base_target.y + radius * pitch.sin(),
             base_target.z + horizontal * yaw.cos(),
         )
+    }
+
+    fn clamp_pan_to_horizon(&mut self) {
+        let (_, base_target) = camera_base_pose(0.0);
+        let eye = self.eye_for_target(base_target) + self.pan;
+        let target = base_target + self.pan;
+        let min_y = eye.y.min(target.y);
+
+        if min_y < Self::MIN_CAMERA_Y {
+            self.pan.y += Self::MIN_CAMERA_Y - min_y;
+        }
     }
 }
 
