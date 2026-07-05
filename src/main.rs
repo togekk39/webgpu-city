@@ -1,4 +1,4 @@
-use cgmath::{Deg, InnerSpace, Matrix4, Point3, SquareMatrix, Vector3, perspective};
+use cgmath::{Deg, InnerSpace, Matrix4, Point3, SquareMatrix, Vector3, ortho, perspective};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -95,10 +95,12 @@ struct Uniforms {
     camera_position: [f32; 4],
     sun_direction: [f32; 4],
     sun_color: [f32; 4],
+    light_view_proj: [[f32; 4]; 4],
     sky_color: [f32; 4],
     horizon_color: [f32; 4],
     ambient_color: [f32; 4],
     settings: [f32; 4],
+    sunset: [f32; 4],
 }
 
 impl Uniforms {
@@ -107,12 +109,14 @@ impl Uniforms {
             view_proj: Matrix4::identity().into(),
             inv_view_proj: Matrix4::identity().into(),
             camera_position: [0.0, 0.0, 0.0, 1.0],
-            sun_direction: [-0.92, 0.16, -0.36, 0.0],
-            sun_color: [1.0, 0.55, 0.20, 1.0],
-            sky_color: [0.08, 0.13, 0.23, 1.0],
-            horizon_color: [1.0, 0.42, 0.12, 1.0],
-            ambient_color: [0.12, 0.17, 0.26, 1.0],
-            settings: [0.0, 1.08, 0.032, 1.0],
+            sun_direction: sunset_sun_direction().extend(0.0).into(),
+            sun_color: [1.0, 0.61, 0.25, 1.0],
+            light_view_proj: Matrix4::identity().into(),
+            sky_color: [0.045, 0.085, 0.18, 1.0],
+            horizon_color: [1.0, 0.47, 0.15, 1.0],
+            ambient_color: [0.095, 0.13, 0.22, 1.0],
+            settings: [0.0, 1.12, 0.034, 1.0],
+            sunset: [5.5_f32.to_radians(), 220.0_f32.to_radians(), 0.0105, 1.25],
         }
     }
 }
@@ -421,6 +425,47 @@ struct DepthTexture {
     format: wgpu::TextureFormat,
 }
 
+struct ShadowTexture {
+    view: wgpu::TextureView,
+    sampler: wgpu::Sampler,
+    format: wgpu::TextureFormat,
+}
+
+impl ShadowTexture {
+    fn create(device: &wgpu::Device, size: u32) -> Self {
+        let format = wgpu::TextureFormat::Depth32Float;
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sunset directional shadow map"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sunset shadow comparison sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        Self {
+            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            sampler,
+            format,
+        }
+    }
+}
+
 impl DepthTexture {
     fn create(device: &wgpu::Device, width: u32, height: u32) -> Self {
         let format = wgpu::TextureFormat::Depth24Plus;
@@ -557,6 +602,7 @@ struct State {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     sky_pipeline: wgpu::RenderPipeline,
+    shadow_pipeline: wgpu::RenderPipeline,
     render_pipeline: wgpu::RenderPipeline,
     post_pipeline: wgpu::RenderPipeline,
     post_layout: wgpu::BindGroupLayout,
@@ -566,7 +612,9 @@ struct State {
     num_indices: u32,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
+    shadow_bind_group: wgpu::BindGroup,
     depth: DepthTexture,
+    shadow: ShadowTexture,
     render_scale: f32,
     clock: AppClock,
 }
@@ -619,7 +667,7 @@ impl State {
 
         let mesh = build_city_mesh();
         eprintln!(
-            "city stats: vertices={} indices={} draw_calls=3 render_scale={:0.2} postprocess=bloom+vignette+filmic",
+            "city stats: vertices={} indices={} draw_calls=4 shadow_map=2048(default)/1024(fallback) render_scale={:0.2} postprocess=targeted_bloom+filmic",
             mesh.vertices.len(),
             mesh.indices.len(),
             render_scale
@@ -642,6 +690,7 @@ impl State {
             .unwrap_or_else(Matrix4::identity)
             .into();
         uniforms.camera_position = [initial_eye.x, initial_eye.y, initial_eye.z, 1.0];
+        uniforms.light_view_proj = light_matrix().into();
         let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("camera uniforms"),
             contents: bytemuck::bytes_of(&uniforms),
@@ -669,6 +718,43 @@ impl State {
             }],
         });
         let depth = DepthTexture::create(&device, hdr_width, hdr_height);
+        let shadow_size = configured_shadow_size();
+        let shadow = ShadowTexture::create(&device, shadow_size);
+        let shadow_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("shadow texture layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Depth,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+        });
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shadow bind group"),
+            layout: &shadow_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&shadow.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shadow.sampler),
+                },
+            ],
+        });
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post texture layout"),
             entries: &[
@@ -694,7 +780,7 @@ impl State {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("city pipeline layout"),
-            bind_group_layouts: &[Some(&uniform_layout)],
+            bind_group_layouts: &[Some(&uniform_layout), Some(&shadow_layout)],
             immediate_size: 0,
         });
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -723,6 +809,41 @@ impl State {
             }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: None,
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let shadow_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("shadow pipeline layout"),
+                bind_group_layouts: &[Some(&uniform_layout)],
+                immediate_size: 0,
+            });
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("directional shadow depth pipeline"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_shadow"),
+                buffers: &[Some(Vertex::layout())],
+                compilation_options: Default::default(),
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState {
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: shadow.format,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
             multisample: Default::default(),
             multiview_mask: None,
             cache: None,
@@ -763,7 +884,11 @@ impl State {
         });
         let post_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("post pipeline layout"),
-            bind_group_layouts: &[Some(&uniform_layout), Some(&post_layout)],
+            bind_group_layouts: &[
+                Some(&uniform_layout),
+                Some(&shadow_layout),
+                Some(&post_layout),
+            ],
             immediate_size: 0,
         });
         let post_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -798,6 +923,7 @@ impl State {
             queue,
             config,
             sky_pipeline,
+            shadow_pipeline,
             render_pipeline,
             post_pipeline,
             post_layout,
@@ -807,7 +933,9 @@ impl State {
             num_indices: mesh.indices.len() as u32,
             uniform_buffer,
             uniform_bind_group,
+            shadow_bind_group,
             depth,
+            shadow,
             render_scale,
             clock: AppClock::new(),
         }
@@ -833,6 +961,7 @@ impl State {
         uniforms.view_proj = view_proj.into();
         uniforms.inv_view_proj = view_proj.invert().unwrap_or_else(Matrix4::identity).into();
         uniforms.camera_position = [eye.x, eye.y, eye.z, 1.0];
+        uniforms.light_view_proj = light_matrix().into();
         uniforms.settings[0] = elapsed;
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
@@ -857,6 +986,28 @@ impl State {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("city encoder"),
             });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("directional shadow depth pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.num_indices, 0, 0..1);
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("procedural sky render pass"),
@@ -904,6 +1055,7 @@ impl State {
             });
             pass.set_pipeline(&self.render_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            pass.set_bind_group(1, &self.shadow_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..self.num_indices, 0, 0..1);
@@ -927,12 +1079,20 @@ impl State {
             });
             pass.set_pipeline(&self.post_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            pass.set_bind_group(1, &self.hdr.bind_group, &[]);
+            pass.set_bind_group(1, &self.shadow_bind_group, &[]);
+            pass.set_bind_group(2, &self.hdr.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
         self.queue.submit(Some(encoder.finish()));
         self.queue.present(frame);
         RenderOutcome::Presented
+    }
+}
+
+fn configured_shadow_size() -> u32 {
+    match option_env!("WEBGPU_CITY_SHADOW_SIZE") {
+        Some("1024") => 1024,
+        _ => 2048,
     }
 }
 
@@ -953,6 +1113,26 @@ enum CameraMode {
     RooftopVista,
     CinematicOrbit,
     HeroStreet,
+}
+
+fn sunset_sun_direction() -> Vector3<f32> {
+    let elevation = 5.5_f32.to_radians();
+    let azimuth = 220.0_f32.to_radians();
+    Vector3::new(
+        azimuth.cos() * elevation.cos(),
+        elevation.sin(),
+        azimuth.sin() * elevation.cos(),
+    )
+    .normalize()
+}
+
+fn light_matrix() -> Matrix4<f32> {
+    let sun = sunset_sun_direction();
+    let center = Point3::new(0.0, 5.0, -24.0);
+    let eye = center + sun * 82.0;
+    let view = Matrix4::look_at_rh(eye, center, Vector3::unit_y());
+    let proj = ortho(-58.0, 58.0, -42.0, 50.0, 1.0, 170.0);
+    proj * view
 }
 
 fn camera_matrix(width: u32, height: u32, time: f32) -> (Matrix4<f32>, Point3<f32>) {
@@ -1956,7 +2136,7 @@ mod tests {
     fn city_mesh_stats_are_bounded() {
         let mesh = build_city_mesh();
         eprintln!(
-            "city test stats: vertices={} indices={} draw_calls=3",
+            "city test stats: vertices={} indices={} draw_calls=4",
             mesh.vertices.len(),
             mesh.indices.len()
         );
