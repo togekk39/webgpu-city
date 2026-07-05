@@ -63,13 +63,15 @@ fn fbm(p: vec2<f32>) -> f32 {
 }
 
 fn material_response(id: f32) -> vec4<f32> {
-    if (id < 0.5) { return vec4<f32>(0.72, 0.10, 0.00, 0.0); }      // asphalt rough, wet sheen
+    if (id < 0.5) { return vec4<f32>(0.78, 0.08, 0.00, 0.0); }      // asphalt rough, faintly patched
     if (id < 1.5) { return vec4<f32>(0.88, 0.04, 0.00, 0.0); }      // concrete
-    if (id < 2.5) { return vec4<f32>(0.78, 0.05, 0.00, 0.0); }      // brick
-    if (id < 3.5) { return vec4<f32>(0.28, 0.65, 0.00, 0.0); }      // glass
-    if (id < 4.5) { return vec4<f32>(0.38, 0.18, 3.20, 1.0); }      // lit window/sign emissive
-    if (id < 5.5) { return vec4<f32>(0.46, 0.28, 0.00, 0.0); }      // metal roof
-    if (id < 6.5) { return vec4<f32>(0.80, 0.02, 0.00, 0.0); }      // road marking
+    if (id < 2.5) { return vec4<f32>(0.80, 0.04, 0.00, 0.0); }      // brick/stucco
+    if (id < 3.5) { return vec4<f32>(0.18, 0.48, 0.00, 0.0); }      // single geometry window pane: no nested grid
+    if (id < 4.5) { return vec4<f32>(0.24, 0.72, 0.00, 0.0); }      // curtain wall: procedural facade grid allowed
+    if (id < 5.5) { return vec4<f32>(0.16, 0.78, 0.00, 0.0); }      // shop glass
+    if (id < 6.5) { return vec4<f32>(0.42, 0.14, 1.65, 1.0); }      // emissive windows/signs, controlled bloom
+    if (id < 7.5) { return vec4<f32>(0.48, 0.24, 0.00, 0.0); }      // metal
+    if (id < 8.5) { return vec4<f32>(0.82, 0.02, 0.00, 0.0); }      // road marking
     return vec4<f32>(0.70, 0.03, 0.00, 0.0);                       // foliage
 }
 
@@ -107,15 +109,24 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let rain = fbm(vec2<f32>(input.world_position.x * 1.8 + input.world_position.z * 0.25, input.world_position.y * 0.13));
     let streaks = smoothstep(0.48, 0.86, rain) * smoothstep(14.0, 1.0, input.world_position.y);
     let grime = streaks * 0.10;
-    if (input.material_id > 0.5 && input.material_id < 3.5) { base *= 1.0 - grime; }
+    if (input.material_id > 0.5 && input.material_id < 5.5) { base *= 1.0 - grime; }
 
-    if (input.material_id > 2.5 && input.material_id < 3.5) {
+    if (input.material_id > 3.5 && input.material_id < 4.5) {
         let cell = floor(input.uv * vec2<f32>(7.0, 18.0));
         let local = fract(input.uv * vec2<f32>(7.0, 18.0));
         let frame = step(0.08, local.x) * step(local.x, 0.92) * step(0.10, local.y) * step(local.y, 0.78);
         let lit = step(0.57, hash21(cell + floor(input.world_position.xz)));
         let warm = mix(vec3<f32>(0.55, 0.72, 1.0), vec3<f32>(1.0, 0.62, 0.25), hash21(cell + 9.1));
-        base = mix(base * vec3<f32>(0.08, 0.13, 0.18), warm, frame * lit * 0.85);
+        base = mix(base * vec3<f32>(0.06, 0.10, 0.13), warm * 0.75, frame * lit * 0.55);
+    }
+
+    if (input.material_id > 2.5 && input.material_id < 3.5) {
+        base = mix(base, vec3<f32>(0.015, 0.030, 0.045), 0.55);
+        base += vec3<f32>(0.10, 0.045, 0.018) * step(0.82, hash21(floor(input.world_position.xy * 2.0)));
+    }
+    if (input.material_id > 4.5 && input.material_id < 5.5) {
+        base = mix(base, vec3<f32>(0.018, 0.024, 0.028), 0.45);
+        base += vec3<f32>(0.18, 0.09, 0.035) * smoothstep(0.68, 0.95, hash21(floor(input.uv * vec2<f32>(5.0, 2.0))));
     }
 
     let diffuse = max(dot(n, sun), 0.0);
