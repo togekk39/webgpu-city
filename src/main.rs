@@ -1,4 +1,4 @@
-use cgmath::{Deg, Matrix4, Point3, SquareMatrix, Vector3, perspective};
+use cgmath::{Deg, InnerSpace, Matrix4, Point3, SquareMatrix, Vector3, perspective};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -127,6 +127,204 @@ impl Mesh {
         Self {
             vertices: Vec::new(),
             indices: Vec::new(),
+        }
+    }
+
+    fn add_beveled_box(
+        &mut self,
+        center: [f32; 3],
+        size: [f32; 3],
+        bevel: f32,
+        color: [f32; 3],
+        material_id: f32,
+    ) {
+        let [cx, cy, cz] = center;
+        let [hx, hy, hz] = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
+        let b = bevel.min(hx * 0.35).min(hy * 0.35).min(hz * 0.35).max(0.0);
+        if b <= 0.001 {
+            self.add_box(center, size, color, material_id);
+            return;
+        }
+        let xs = [cx - hx, cx - hx + b, cx + hx - b, cx + hx];
+        let ys = [cy - hy, cy - hy + b, cy + hy - b, cy + hy];
+        let zs = [cz - hz, cz - hz + b, cz + hz - b, cz + hz];
+        let mut quad = |pts: [[f32; 3]; 4], normal: [f32; 3], uv: [f32; 2]| {
+            let base = self.vertices.len() as u32;
+            let uvs = [[0.0, 0.0], [uv[0], 0.0], [uv[0], uv[1]], [0.0, uv[1]]];
+            for i in 0..4 {
+                self.vertices.push(Vertex {
+                    position: pts[i],
+                    color,
+                    normal,
+                    uv: uvs[i],
+                    material_id,
+                });
+            }
+            self.indices
+                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        };
+        quad(
+            [
+                [xs[1], ys[0], zs[3]],
+                [xs[2], ys[0], zs[3]],
+                [xs[2], ys[3], zs[3]],
+                [xs[1], ys[3], zs[3]],
+            ],
+            [0.0, 0.0, 1.0],
+            [size[0], size[1]],
+        );
+        quad(
+            [
+                [xs[2], ys[0], zs[0]],
+                [xs[1], ys[0], zs[0]],
+                [xs[1], ys[3], zs[0]],
+                [xs[2], ys[3], zs[0]],
+            ],
+            [0.0, 0.0, -1.0],
+            [size[0], size[1]],
+        );
+        quad(
+            [
+                [xs[0], ys[0], zs[1]],
+                [xs[0], ys[0], zs[2]],
+                [xs[0], ys[3], zs[2]],
+                [xs[0], ys[3], zs[1]],
+            ],
+            [-1.0, 0.0, 0.0],
+            [size[2], size[1]],
+        );
+        quad(
+            [
+                [xs[3], ys[0], zs[2]],
+                [xs[3], ys[0], zs[1]],
+                [xs[3], ys[3], zs[1]],
+                [xs[3], ys[3], zs[2]],
+            ],
+            [1.0, 0.0, 0.0],
+            [size[2], size[1]],
+        );
+        quad(
+            [
+                [xs[1], ys[3], zs[3]],
+                [xs[2], ys[3], zs[3]],
+                [xs[2], ys[3], zs[0]],
+                [xs[1], ys[3], zs[0]],
+            ],
+            [0.0, 1.0, 0.0],
+            [size[0], size[2]],
+        );
+        quad(
+            [
+                [xs[1], ys[0], zs[0]],
+                [xs[2], ys[0], zs[0]],
+                [xs[2], ys[0], zs[3]],
+                [xs[1], ys[0], zs[3]],
+            ],
+            [0.0, -1.0, 0.0],
+            [size[0], size[2]],
+        );
+        let n = 0.70710677;
+        for &(z0, z1, nz) in &[(zs[2], zs[3], n), (zs[0], zs[1], -n)] {
+            quad(
+                [
+                    [xs[0], ys[1], z1],
+                    [xs[1], ys[0], z0],
+                    [xs[1], ys[3], z0],
+                    [xs[0], ys[2], z1],
+                ],
+                [-n, 0.0, nz],
+                [b, size[1]],
+            );
+            quad(
+                [
+                    [xs[2], ys[0], z0],
+                    [xs[3], ys[1], z1],
+                    [xs[3], ys[2], z1],
+                    [xs[2], ys[3], z0],
+                ],
+                [n, 0.0, nz],
+                [b, size[1]],
+            );
+        }
+        for &(y0, y1, ny) in &[(ys[2], ys[3], n), (ys[0], ys[1], -n)] {
+            quad(
+                [
+                    [xs[1], y1, zs[3]],
+                    [xs[2], y1, zs[3]],
+                    [xs[2], y0, zs[2]],
+                    [xs[1], y0, zs[2]],
+                ],
+                [0.0, ny, n],
+                [size[0], b],
+            );
+            quad(
+                [
+                    [xs[2], y1, zs[0]],
+                    [xs[1], y1, zs[0]],
+                    [xs[1], y0, zs[1]],
+                    [xs[2], y0, zs[1]],
+                ],
+                [0.0, ny, -n],
+                [size[0], b],
+            );
+            quad(
+                [
+                    [xs[0], y1, zs[1]],
+                    [xs[0], y1, zs[2]],
+                    [xs[1], y0, zs[2]],
+                    [xs[1], y0, zs[1]],
+                ],
+                [-n, ny, 0.0],
+                [size[2], b],
+            );
+            quad(
+                [
+                    [xs[3], y1, zs[2]],
+                    [xs[3], y1, zs[1]],
+                    [xs[2], y0, zs[1]],
+                    [xs[2], y0, zs[2]],
+                ],
+                [n, ny, 0.0],
+                [size[2], b],
+            );
+        }
+    }
+
+    fn add_prism(
+        &mut self,
+        center: [f32; 3],
+        radius: f32,
+        height: f32,
+        sides: u32,
+        color: [f32; 3],
+        material_id: f32,
+    ) {
+        let n = sides.max(6);
+        let [cx, cy, cz] = center;
+        for i in 0..n {
+            let a0 = i as f32 / n as f32 * std::f32::consts::TAU;
+            let a1 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
+            let (x0, z0) = (cx + a0.cos() * radius, cz + a0.sin() * radius);
+            let (x1, z1) = (cx + a1.cos() * radius, cz + a1.sin() * radius);
+            let mid = (a0 + a1) * 0.5;
+            let normal = Vector3::new(mid.cos(), 0.0, mid.sin()).normalize();
+            let base = self.vertices.len() as u32;
+            for p in [
+                [x0, cy - height * 0.5, z0],
+                [x1, cy - height * 0.5, z1],
+                [x1, cy + height * 0.5, z1],
+                [x0, cy + height * 0.5, z0],
+            ] {
+                self.vertices.push(Vertex {
+                    position: p,
+                    color,
+                    normal: normal.into(),
+                    uv: [0.0, 0.0],
+                    material_id,
+                });
+            }
+            self.indices
+                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
 
@@ -764,7 +962,10 @@ fn camera_matrix(width: u32, height: u32, time: f32) -> (Matrix4<f32>, Point3<f3
         CameraMode::HeroStreet
     };
     let (eye, target) = match mode {
-        CameraMode::HeroStreet => (Point3::new(5.8, 7.0, 18.5), Point3::new(-0.55, 2.2, -11.0)),
+        CameraMode::HeroStreet => (
+            Point3::new(1.35, 2.85, 20.0),
+            Point3::new(-0.25, 1.85, -16.0),
+        ),
         CameraMode::CinematicOrbit => {
             let angle = time * 0.055;
             let eye = Point3::new(
@@ -815,63 +1016,141 @@ fn build_building(mesh: &mut Mesh, center: [f32; 3], size: [f32; 3], kind: Facad
     let [cx, _, cz] = center;
     let [sx, height, sz] = size;
     let (color, mat) = facade_color(kind, seed);
-    mesh.add_box([cx, height * 0.5, cz], [sx, height, sz], color, mat);
+    let hero = cx.abs() < 7.5 && cz > -13.5 && cz < 14.5;
+    let street_side = if cx > 0.0 { -1.0 } else { 1.0 };
+    let facade_z = cz + street_side * sz * 0.5;
+    let bevel = if hero { 0.08 } else { 0.025 };
 
-    // Setbacks and roof silhouettes keep the skyline irregular without per-window cubes.
-    if height > 5.0 {
+    mesh.add_beveled_box([cx, height * 0.5, cz], [sx, height, sz], bevel, color, mat);
+
+    // Layered street facade: shallow skin, different ground-floor scale, and cap bands.
+    let skin_color = [color[0] * 1.10, color[1] * 1.08, color[2] * 1.04];
+    mesh.add_box(
+        [cx, height * 0.52, facade_z + street_side * 0.022],
+        [sx * 0.94, height * 0.88, 0.045],
+        skin_color,
+        mat,
+    );
+    mesh.add_beveled_box(
+        [cx, 0.72, facade_z + street_side * 0.055],
+        [sx * 0.96, 1.28, 0.10],
+        0.025,
+        [0.13, 0.12, 0.11],
+        MAT_GLASS,
+    );
+    mesh.add_box(
+        [cx, 1.42, facade_z + street_side * 0.10],
+        [sx * 0.82, 0.28, 0.075],
+        [0.95, 0.35, 0.10],
+        MAT_EMISSIVE,
+    );
+    mesh.add_box(
+        [cx, 1.20, facade_z + street_side * 0.22],
+        [sx * 0.72, 0.08, 0.42],
+        [0.18, 0.05, 0.035],
+        MAT_METAL,
+    ); // projecting awning/sign lip
+
+    let floors = ((height - 1.8) / 0.85).floor().max(2.0) as i32;
+    let bays = (sx / 0.42).floor().max(3.0) as i32;
+    for b in 0..bays {
+        let x = cx - sx * 0.40 + (b as f32 + 0.5) * (sx * 0.80 / bays as f32);
         mesh.add_box(
-            [cx + sx * 0.08, height + 0.45, cz - sz * 0.06],
-            [sx * 0.58, 0.9, sz * 0.55],
+            [x, height * 0.5 + 0.25, facade_z + street_side * 0.075],
+            [0.035, height * 0.78, 0.07],
+            [0.18, 0.17, 0.15],
+            MAT_CONCRETE,
+        );
+        for f in 0..floors {
+            let y = 1.95 + f as f32 * 0.82;
+            if y > height - 0.45 {
+                continue;
+            }
+            let lit = (seed + b * 11 + f * 5).rem_euclid(4) == 0;
+            let wc = if lit {
+                [1.0, 0.62, 0.30]
+            } else {
+                [0.035, 0.055, 0.075]
+            };
+            mesh.add_box(
+                [x, y, facade_z + street_side * 0.09],
+                [sx * 0.55 / bays as f32, 0.34, 0.055],
+                [0.025, 0.03, 0.035],
+                MAT_METAL,
+            );
+            mesh.add_box(
+                [x, y, facade_z + street_side * 0.115],
+                [sx * 0.43 / bays as f32, 0.24, 0.035],
+                wc,
+                if lit { MAT_EMISSIVE } else { MAT_GLASS },
+            );
+            if hero && f % 3 == 1 && b % 2 == seed.rem_euclid(2) {
+                mesh.add_beveled_box(
+                    [x, y - 0.25, facade_z + street_side * 0.24],
+                    [sx * 0.48 / bays as f32, 0.055, 0.36],
+                    0.015,
+                    [0.20, 0.19, 0.18],
+                    MAT_CONCRETE,
+                );
+            }
+        }
+    }
+    for f in 0..floors {
+        let y = 1.72 + f as f32 * 0.82;
+        if y < height - 0.35 {
+            mesh.add_box(
+                [cx, y, facade_z + street_side * 0.085],
+                [sx * 0.92, 0.035, 0.065],
+                [0.20, 0.19, 0.17],
+                MAT_CONCRETE,
+            );
+        }
+    }
+
+    if height > 5.0 {
+        mesh.add_beveled_box(
+            [cx + sx * 0.05, height + 0.38, cz - street_side * sz * 0.08],
+            [sx * 0.62, 0.76, sz * 0.52],
+            0.06,
             color,
             mat,
         );
     }
-    mesh.add_box(
-        [cx, height + 0.08, cz],
-        [sx * 1.05, 0.16, sz * 1.05],
+    mesh.add_beveled_box(
+        [cx, height + 0.10, cz],
+        [sx * 1.07, 0.20, sz * 1.07],
+        0.045,
         [0.22, 0.24, 0.23],
         MAT_METAL,
     );
-    mesh.add_box(
-        [cx - sx * 0.25, height + 0.34, cz + sz * 0.22],
-        [0.16, 0.36, 0.16],
+    mesh.add_beveled_box(
+        [cx, height + 0.36, facade_z - street_side * 0.04],
+        [sx * 1.02, 0.34, 0.18],
+        0.035,
+        [0.19, 0.20, 0.19],
+        MAT_METAL,
+    );
+    mesh.add_prism(
+        [cx - sx * 0.25, height + 0.38, cz + sz * 0.22],
+        0.10,
+        0.42,
+        8,
         [0.42, 0.45, 0.44],
         MAT_METAL,
     );
     if seed.rem_euclid(3) == 0 {
-        mesh.add_box(
+        mesh.add_beveled_box(
             [cx + sx * 0.24, height + 0.25, cz - sz * 0.18],
             [0.42, 0.20, 0.30],
+            0.035,
             [0.31, 0.36, 0.38],
-            MAT_METAL,
-        );
-    }
-    if matches!(
-        kind,
-        FacadeKind::MixedUse | FacadeKind::LowShop | FacadeKind::Corner
-    ) {
-        mesh.add_box(
-            [cx, 0.75, cz + sz * 0.515],
-            [sx * 0.72, 0.42, 0.035],
-            [1.0, 0.46, 0.16],
-            MAT_EMISSIVE,
-        );
-        mesh.add_box(
-            [cx, 1.10, cz + sz * 0.525],
-            [sx * 0.82, 0.08, 0.16],
-            [0.18, 0.05, 0.035],
             MAT_METAL,
         );
     }
 }
 
 fn build_streetlight(mesh: &mut Mesh, x: f32, z: f32) {
-    mesh.add_box(
-        [x, 0.8, z],
-        [0.06, 1.6, 0.06],
-        [0.18, 0.16, 0.14],
-        MAT_METAL,
-    );
+    mesh.add_prism([x, 0.8, z], 0.04, 1.6, 8, [0.18, 0.16, 0.14], MAT_METAL);
     mesh.add_box(
         [x, 1.62, z - 0.18],
         [0.08, 0.08, 0.34],
@@ -931,9 +1210,10 @@ fn build_city_mesh() -> Mesh {
         );
     }
     for x in [-3.0, 3.0] {
-        mesh.add_box(
+        mesh.add_beveled_box(
             [x, 0.04, 0.0],
             [1.15, 0.08, 42.0],
+            0.025,
             [0.24, 0.23, 0.21],
             MAT_CONCRETE,
         );
@@ -989,20 +1269,46 @@ fn build_city_mesh() -> Mesh {
         (-0.7, 4.0, [0.12, 0.18, 0.30]),
         (0.8, 10.0, [0.75, 0.72, 0.60]),
     ] {
-        mesh.add_box([x, 0.20, z], [0.58, 0.28, 1.05], c, MAT_METAL);
+        mesh.add_beveled_box([x, 0.20, z], [0.58, 0.28, 1.05], 0.06, c, MAT_METAL);
         mesh.add_box(
             [x, 0.43, z - 0.05],
             [0.42, 0.22, 0.52],
             [0.04, 0.06, 0.08],
             MAT_GLASS,
         );
+        for wx in [-0.34, 0.34] {
+            for wz in [-0.34, 0.34] {
+                mesh.add_prism(
+                    [x + wx, 0.12, z + wz],
+                    0.105,
+                    0.055,
+                    8,
+                    [0.01, 0.01, 0.012],
+                    MAT_METAL,
+                );
+            }
+        }
     }
     for x in [-3.35, 3.35] {
         for z in (-18..=18).step_by(6) {
+            mesh.add_prism(
+                [x, 0.32, z as f32],
+                0.055,
+                0.64,
+                7,
+                [0.18, 0.10, 0.05],
+                MAT_BRICK,
+            );
             mesh.add_box(
-                [x, 0.55, z as f32],
-                [0.55, 1.1, 0.55],
-                [0.08, 0.20, 0.10],
+                [x, 0.86, z as f32],
+                [0.72, 0.58, 0.035],
+                [0.07, 0.22, 0.10],
+                MAT_FOLIAGE,
+            );
+            mesh.add_box(
+                [x, 0.92, z as f32],
+                [0.035, 0.62, 0.72],
+                [0.05, 0.18, 0.08],
                 MAT_FOLIAGE,
             );
         }
