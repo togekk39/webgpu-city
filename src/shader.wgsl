@@ -20,9 +20,25 @@ var shadow_map: texture_depth_2d;
 @group(1) @binding(1)
 var shadow_sampler: sampler_comparison;
 
+struct MaterialUniform {
+    fallback_color: vec4<f32>,
+    material: vec4<f32>,
+};
+
 @group(2) @binding(0)
-var hdr_scene: texture_2d<f32>;
+var<uniform> material_uniform: MaterialUniform;
 @group(2) @binding(1)
+var base_color_texture: texture_2d<f32>;
+@group(2) @binding(2)
+var material_sampler: sampler;
+@group(2) @binding(3)
+var normal_texture: texture_2d<f32>;
+@group(2) @binding(4)
+var emissive_texture: texture_2d<f32>;
+
+@group(3) @binding(0)
+var hdr_scene: texture_2d<f32>;
+@group(3) @binding(1)
 var hdr_sampler: sampler;
 
 struct VertexInput {
@@ -143,38 +159,41 @@ fn vs_shadow(input: VertexInput) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    let n = normalize(input.normal);
+    let sampled_normal = textureSample(normal_texture, material_sampler, input.uv).rgb * 2.0 - vec3<f32>(1.0);
+    let normal_mix = normalize(input.normal + sampled_normal * 0.35);
+    let n = normalize(mix(input.normal, normal_mix, material_uniform.material.z));
     let v = normalize(uniforms.camera_position.xyz - input.world_position);
     let sun = normalize(uniforms.sun_direction.xyz);
-    let m = material_response(input.material_id);
-    var base = input.color;
+    let m = material_response(material_uniform.material.x);
+    let sampled_base = textureSample(base_color_texture, material_sampler, input.uv).rgb;
+    var base = mix(material_uniform.fallback_color.rgb, sampled_base, material_uniform.material.y);
 
     let fine_noise = fbm(input.world_position.xz * 0.65 + input.uv * 0.35);
     base *= 0.985 + fine_noise * 0.015;
     let atlas_uv = fract(input.uv * 0.55);
-    if (input.material_id > 1.5 && input.material_id < 2.5) {
+    if (material_uniform.material.x > 1.5 && material_uniform.material.x < 2.5) {
         let mortar_x = step(0.07, atlas_uv.x) * step(atlas_uv.x, 0.93);
         let mortar_y = step(0.13, atlas_uv.y) * step(atlas_uv.y, 0.87);
         base *= mix(vec3<f32>(0.82,0.78,0.72), vec3<f32>(1.02,0.94,0.86), mortar_x * mortar_y);
     }
-    if (input.material_id > 0.5 && input.material_id < 1.5) {
+    if (material_uniform.material.x > 0.5 && material_uniform.material.x < 1.5) {
         let aggregate = smoothstep(0.25, 0.95, fbm(input.uv * 3.7));
         base *= mix(vec3<f32>(0.78,0.78,0.76), vec3<f32>(1.10,1.07,1.00), aggregate * 0.45);
     }
-    if (input.material_id > 9.5 && input.material_id < 10.5) {
+    if (material_uniform.material.x > 9.5 && material_uniform.material.x < 10.5) {
         let seams = min(smoothstep(0.035, 0.055, fract(input.uv.x * 1.7)), smoothstep(0.035, 0.055, fract(input.uv.y * 1.2)));
         base *= mix(vec3<f32>(0.58,0.56,0.54), vec3<f32>(1.0), seams);
     }
-    if (input.material_id > 10.5 && input.material_id < 11.5) {
+    if (material_uniform.material.x > 10.5 && material_uniform.material.x < 11.5) {
         let grid = step(0.08, fract(input.uv.x * 6.0)) * step(0.08, fract(input.uv.y * 2.0));
         base = mix(vec3<f32>(0.015,0.020,0.025), base * 1.25, grid);
     }
     let rain = fbm(vec2<f32>(input.world_position.x * 1.8 + input.world_position.z * 0.25, input.world_position.y * 0.13));
     let streaks = smoothstep(0.48, 0.86, rain) * smoothstep(14.0, 1.0, input.world_position.y);
     let grime = streaks * 0.10;
-    if (input.material_id > 0.5 && input.material_id < 5.5) { base *= 1.0 - grime; }
+    if (material_uniform.material.x > 0.5 && material_uniform.material.x < 5.5) { base *= 1.0 - grime; }
 
-    if (input.material_id > 3.5 && input.material_id < 4.5) {
+    if (material_uniform.material.x > 3.5 && material_uniform.material.x < 4.5) {
         let cell = floor(input.uv * vec2<f32>(7.0, 18.0));
         let local = fract(input.uv * vec2<f32>(7.0, 18.0));
         let frame = step(0.08, local.x) * step(local.x, 0.92) * step(0.10, local.y) * step(local.y, 0.78);
@@ -183,11 +202,11 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         base = mix(base * vec3<f32>(0.05, 0.08, 0.11), warm * 0.42, frame * lit * 0.30);
     }
 
-    if (input.material_id > 2.5 && input.material_id < 3.5) {
+    if (material_uniform.material.x > 2.5 && material_uniform.material.x < 3.5) {
         base = mix(base, vec3<f32>(0.015, 0.030, 0.045), 0.55);
         base += vec3<f32>(0.10, 0.045, 0.018) * step(0.82, hash21(floor(input.world_position.xy * 2.0)));
     }
-    if (input.material_id > 4.5 && input.material_id < 5.5) {
+    if (material_uniform.material.x > 4.5 && material_uniform.material.x < 5.5) {
         base = mix(base, vec3<f32>(0.018, 0.024, 0.028), 0.45);
         base += vec3<f32>(0.18, 0.09, 0.035) * smoothstep(0.68, 0.95, hash21(floor(input.uv * vec2<f32>(5.0, 2.0))));
     }
@@ -211,8 +230,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     let direct = uniforms.sun_color.rgb * diffuse * direct_shadow * (1.48 - m.x * 0.34);
     var color = base * (sky_ambient + cool_bounce + direct) + reflection + uniforms.sun_color.rgb * (spec + rim * 1.05);
 
+    let emissive = textureSample(emissive_texture, material_sampler, input.uv).rgb * material_uniform.material.w;
     if (m.w > 0.5) { color += base * m.z * 0.58; }
-    if (input.material_id < 0.5) {
+    color += emissive * (1.15 + m.z * 0.35);
+    if (material_uniform.material.x < 0.5) {
         let lane_reflect = pow(max(dot(reflect(-sun, n), v), 0.0), 26.0);
         color += uniforms.sun_color.rgb * lane_reflect * 0.55 * direct_shadow;
         color *= 0.82 + 0.18 * hash21(input.world_position.xz * 8.0);
