@@ -1,5 +1,8 @@
 use base64::Engine;
-use cgmath::{Deg, InnerSpace, Matrix4, Point3, SquareMatrix, Vector3, ortho, perspective};
+use cgmath::{
+    Deg, InnerSpace, Matrix, Matrix3, Matrix4, Point3, SquareMatrix, Transform, Vector3, ortho,
+    perspective,
+};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 use std::{cell::RefCell, rc::Rc, sync::Arc};
@@ -126,6 +129,22 @@ impl Uniforms {
 struct Mesh {
     vertices: Vec<Vertex>,
     indices: Vec<u32>,
+    submeshes: Vec<Submesh>,
+    materials: Vec<GltfMaterial>,
+}
+
+struct Submesh {
+    index_start: u32,
+    index_count: u32,
+    material_index: usize,
+}
+
+struct GltfMaterial {
+    fallback_color: [f32; 3],
+    material_id: f32,
+    base_color_texture: Option<MaterialTexture>,
+    normal_texture: Option<MaterialTexture>,
+    emissive_texture: Option<MaterialTexture>,
 }
 
 impl Mesh {
@@ -133,6 +152,8 @@ impl Mesh {
         Self {
             vertices: Vec::new(),
             indices: Vec::new(),
+            submeshes: Vec::new(),
+            materials: Vec::new(),
         }
     }
 }
@@ -145,41 +166,25 @@ const CITY_URL: Option<&str> = option_env!("WEBGPU_CITY_GLTF_URL");
 
 fn gltf_material(name: &str) -> ([f32; 3], f32) {
     match name {
-        "asphalt" => ([0.018, 0.018, 0.017], MAT_ASPHALT),
-        "brick" => ([0.25, 0.12, 0.08], MAT_BRICK),
-        "curtain_wall" => ([0.035, 0.075, 0.105], MAT_CURTAIN_WALL),
-        "emissive_window" => ([0.78, 0.42, 0.18], MAT_EMISSIVE_WINDOW),
+        "asphalt" | "road" => ([0.018, 0.018, 0.017], MAT_ASPHALT),
+        "brick" | "brick_facade" => ([0.25, 0.12, 0.08], MAT_BRICK),
+        "curtain_wall" | "glass_facade" => ([0.035, 0.075, 0.105], MAT_CURTAIN_WALL),
+        "emissive_window" | "signage" => ([0.78, 0.42, 0.18], MAT_EMISSIVE_WINDOW),
         "glass" | "window" => ([0.025, 0.045, 0.062], MAT_WINDOW_PANE),
-        "metal" => ([0.18, 0.18, 0.17], MAT_METAL),
-        "roof_tar" => ([0.04, 0.038, 0.035], MAT_ROOF_TAR),
+        "metal" | "metal_dark" => ([0.18, 0.18, 0.17], MAT_METAL),
+        "roof_tar" | "rooftop" => ([0.04, 0.038, 0.035], MAT_ROOF_TAR),
+        "foliage" => ([0.09, 0.18, 0.07], MAT_FOLIAGE),
         "solar" => ([0.025, 0.035, 0.045], MAT_SOLAR),
+        "sidewalk" | "concrete" => ([0.28, 0.26, 0.23], MAT_CONCRETE),
         _ => ([0.28, 0.26, 0.23], MAT_CONCRETE),
     }
 }
 
+#[derive(Clone)]
 struct MaterialTexture {
     pixels: Vec<u8>,
     width: u32,
     height: u32,
-}
-
-impl MaterialTexture {
-    fn sample(&self, uv: [f32; 2]) -> [f32; 3] {
-        let u = uv[0].rem_euclid(1.0);
-        let v = uv[1].rem_euclid(1.0);
-        let x = (u * self.width as f32)
-            .floor()
-            .clamp(0.0, self.width.saturating_sub(1) as f32) as u32;
-        let y = ((1.0 - v) * self.height as f32)
-            .floor()
-            .clamp(0.0, self.height.saturating_sub(1) as f32) as u32;
-        let offset = ((y * self.width + x) * 4) as usize;
-        [
-            self.pixels[offset] as f32 / 255.0,
-            self.pixels[offset + 1] as f32 / 255.0,
-            self.pixels[offset + 2] as f32 / 255.0,
-        ]
-    }
 }
 
 struct GltfAsset {
@@ -396,7 +401,53 @@ async fn load_city_gltf_mesh_from_slice(bytes: &[u8], asset_source: &str) -> Mes
     }
     let mut mesh = Mesh::new();
 
-    for gltf_mesh in gltf.meshes() {
+    for material_doc in gltf.materials() {
+        let (fallback_color, material_id) = material_doc
+            .name()
+            .map(gltf_material)
+            .unwrap_or_else(|| gltf_material("concrete"));
+        let pbr = material_doc.pbr_metallic_roughness();
+        mesh.materials.push(GltfMaterial {
+            fallback_color,
+            material_id,
+            base_color_texture: pbr
+                .base_color_texture()
+                .and_then(|info| images.get(info.texture().source().index()))
+                .and_then(Clone::clone),
+            normal_texture: material_doc
+                .normal_texture()
+                .and_then(|info| images.get(info.texture().source().index()))
+                .and_then(Clone::clone),
+            emissive_texture: material_doc
+                .emissive_texture()
+                .and_then(|info| images.get(info.texture().source().index()))
+                .and_then(Clone::clone),
+        });
+    }
+    if mesh.materials.is_empty() {
+        let (fallback_color, material_id) = gltf_material("concrete");
+        mesh.materials.push(GltfMaterial {
+            fallback_color,
+            material_id,
+            base_color_texture: None,
+            normal_texture: None,
+            emissive_texture: None,
+        });
+    }
+
+    for node in gltf.nodes() {
+        let Some(gltf_mesh) = node.mesh() else {
+            continue;
+        };
+        let transform = Matrix4::from(node.transform().matrix());
+        let normal_transform = Matrix3::from_cols(
+            transform.x.truncate(),
+            transform.y.truncate(),
+            transform.z.truncate(),
+        )
+        .invert()
+        .unwrap_or_else(Matrix3::identity)
+        .transpose();
         for primitive in gltf_mesh.primitives() {
             let reader = primitive.reader(|buffer| (buffer.index() == 0).then_some(blob));
             let Some(positions) = reader.read_positions() else {
@@ -412,16 +463,14 @@ async fn load_city_gltf_mesh_from_slice(bytes: &[u8], asset_source: &str) -> Mes
                 .read_indices()
                 .map(|indices| indices.into_u32().collect())
                 .unwrap_or_else(|| (0..positions.len() as u32).collect());
-            let material_doc = primitive.material();
-            let material = material_doc
-                .name()
-                .map(gltf_material)
-                .unwrap_or_else(|| gltf_material("concrete"));
-            let texture = material_doc
-                .pbr_metallic_roughness()
-                .base_color_texture()
-                .and_then(|info| images.get(info.texture().source().index()))
-                .and_then(Option::as_ref);
+            let material_index = primitive
+                .material()
+                .index()
+                .unwrap_or(0)
+                .min(mesh.materials.len() - 1);
+            let material_id = mesh.materials[material_index].material_id;
+            let fallback_color = mesh.materials[material_index].fallback_color;
+            let index_start = mesh.indices.len() as u32;
 
             for triangle in indices.chunks_exact(3) {
                 let p0: Vector3<f32> = positions[triangle[0] as usize].into();
@@ -432,32 +481,220 @@ async fn load_city_gltf_mesh_from_slice(bytes: &[u8], asset_source: &str) -> Mes
 
                 for index in triangle {
                     let index = *index as usize;
-                    let normal = normals
+                    let local_normal: Vector3<f32> = normals
                         .as_ref()
                         .and_then(|normals| normals.get(index).copied())
-                        .unwrap_or_else(|| face_normal.into());
+                        .unwrap_or_else(|| face_normal.into())
+                        .into();
+                    let normal = (normal_transform * local_normal).normalize().into();
                     let uv = texcoords
                         .as_ref()
                         .and_then(|texcoords| texcoords.get(index).copied())
                         .unwrap_or([positions[index][0], positions[index][2]]);
-                    let texture_color = texture
-                        .map(|texture| texture.sample(uv))
-                        .unwrap_or(material.0);
+                    let world_position = transform.transform_point(Point3::from(positions[index]));
                     mesh.vertices.push(Vertex {
-                        position: positions[index],
-                        color: texture_color,
+                        position: world_position.into(),
+                        color: fallback_color,
                         normal,
                         uv,
-                        material_id: material.1,
+                        material_id,
                     });
                 }
 
                 mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
             }
+            let index_count = mesh.indices.len() as u32 - index_start;
+            if index_count > 0 {
+                mesh.submeshes.push(Submesh {
+                    index_start,
+                    index_count,
+                    material_index,
+                });
+            }
         }
     }
 
     mesh
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct MaterialUniform {
+    fallback_color: [f32; 4],
+    material: [f32; 4],
+}
+
+struct GpuMaterial {
+    bind_group: wgpu::BindGroup,
+    _uniform_buffer: wgpu::Buffer,
+    _base_color_texture: wgpu::Texture,
+    _normal_texture: wgpu::Texture,
+    _emissive_texture: wgpu::Texture,
+    _sampler: wgpu::Sampler,
+}
+
+fn create_material_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    texture: Option<&MaterialTexture>,
+    fallback: [u8; 4],
+    format: wgpu::TextureFormat,
+) -> wgpu::Texture {
+    let (width, height, data) = if let Some(texture) = texture {
+        (
+            texture.width.max(1),
+            texture.height.max(1),
+            texture.pixels.as_slice(),
+        )
+    } else {
+        (1, 1, fallback.as_slice())
+    };
+    let gpu_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &gpu_texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    gpu_texture
+}
+
+impl GpuMaterial {
+    fn create(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        material: &GltfMaterial,
+    ) -> Self {
+        let base_color = create_material_texture(
+            device,
+            queue,
+            "gltf base color texture",
+            material.base_color_texture.as_ref(),
+            [255, 255, 255, 255],
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let normal = create_material_texture(
+            device,
+            queue,
+            "gltf normal texture",
+            material.normal_texture.as_ref(),
+            [128, 128, 255, 255],
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let emissive = create_material_texture(
+            device,
+            queue,
+            "gltf emissive texture",
+            material.emissive_texture.as_ref(),
+            [0, 0, 0, 255],
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        );
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("gltf material sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let uniform = MaterialUniform {
+            fallback_color: [
+                material.fallback_color[0],
+                material.fallback_color[1],
+                material.fallback_color[2],
+                1.0,
+            ],
+            material: [
+                material.material_id,
+                if material.base_color_texture.is_some() {
+                    1.0
+                } else {
+                    0.0
+                },
+                if material.normal_texture.is_some() {
+                    1.0
+                } else {
+                    0.0
+                },
+                if material.emissive_texture.is_some() {
+                    1.0
+                } else {
+                    0.0
+                },
+            ],
+        };
+        let uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("gltf material uniform"),
+            contents: bytemuck::bytes_of(&uniform),
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let base_view = base_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let normal_view = normal.create_view(&wgpu::TextureViewDescriptor::default());
+        let emissive_view = emissive.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("gltf material bind group"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&base_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&normal_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&emissive_view),
+                },
+            ],
+        });
+        Self {
+            bind_group,
+            _uniform_buffer: uniform_buffer,
+            _base_color_texture: base_color,
+            _normal_texture: normal,
+            _emissive_texture: emissive,
+            _sampler: sampler,
+        }
+    }
 }
 
 struct DepthTexture {
@@ -650,6 +887,8 @@ struct State {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     num_indices: u32,
+    submeshes: Vec<Submesh>,
+    gpu_materials: Vec<GpuMaterial>,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     shadow_bind_group: wgpu::BindGroup,
@@ -710,9 +949,11 @@ impl State {
 
         let mesh = build_city_mesh().await;
         eprintln!(
-            "city stats: vertices={} indices={} draw_calls=4 shadow_map=2048(default)/1024(fallback) render_scale={:0.2} postprocess=targeted_bloom+filmic",
+            "city stats: vertices={} indices={} submeshes={} materials={} shadow_map=2048(default)/1024(fallback) render_scale={:0.2} postprocess=targeted_bloom+filmic",
             mesh.vertices.len(),
             mesh.indices.len(),
+            mesh.submeshes.len(),
+            mesh.materials.len(),
             render_scale
         );
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -799,6 +1040,62 @@ impl State {
                 },
             ],
         });
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("gltf material texture layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let gpu_materials: Vec<GpuMaterial> = mesh
+            .materials
+            .iter()
+            .map(|material| GpuMaterial::create(&device, &queue, &material_layout, material))
+            .collect();
         let post_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("post texture layout"),
             entries: &[
@@ -824,7 +1121,12 @@ impl State {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("city pipeline layout"),
-            bind_group_layouts: &[Some(&uniform_layout), Some(&shadow_layout)],
+            bind_group_layouts: &[
+                Some(&uniform_layout),
+                Some(&shadow_layout),
+                Some(&post_layout),
+                Some(&material_layout),
+            ],
             immediate_size: 0,
         });
         let sky_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -975,6 +1277,8 @@ impl State {
             vertex_buffer,
             index_buffer,
             num_indices: mesh.indices.len() as u32,
+            submeshes: mesh.submeshes,
+            gpu_materials,
             uniform_buffer,
             uniform_bind_group,
             shadow_bind_group,
@@ -1143,7 +1447,18 @@ impl State {
             pass.set_bind_group(1, &self.shadow_bind_group, &[]);
             pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..self.num_indices, 0, 0..1);
+            for submesh in &self.submeshes {
+                pass.set_bind_group(
+                    3,
+                    &self.gpu_materials[submesh.material_index].bind_group,
+                    &[],
+                );
+                pass.draw_indexed(
+                    submesh.index_start..submesh.index_start + submesh.index_count,
+                    0,
+                    0..1,
+                );
+            }
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1287,7 +1602,7 @@ impl CameraController {
             target.y += correction;
         }
         let view = Matrix4::look_at_rh(eye, target, Vector3::unit_y());
-        let proj = perspective(Deg(camera_fov()), aspect, 0.1, 220.0);
+        let proj = perspective(Deg(camera_fov()), aspect, 0.1, 420.0);
         (proj * view, eye)
     }
 
@@ -1360,10 +1675,13 @@ fn camera_fov() -> f32 {
 
 fn camera_base_pose(time: f32) -> (Point3<f32>, Point3<f32>) {
     match camera_mode() {
-        CameraMode::RooftopVista => (Point3::new(10.5, 8.8, 18.5), Point3::new(-5.5, 4.2, -31.0)),
+        CameraMode::RooftopVista => (
+            Point3::new(10.5, 10.8, -58.0),
+            Point3::new(-4.0, 6.0, 118.0),
+        ),
         CameraMode::HeroStreet => (
-            Point3::new(1.35, 2.85, 20.0),
-            Point3::new(-0.25, 1.85, -16.0),
+            Point3::new(1.35, 2.85, -68.0),
+            Point3::new(-0.25, 2.2, 125.0),
         ),
         CameraMode::CinematicOrbit => {
             let angle = time * 0.055;
@@ -1530,6 +1848,14 @@ mod tests {
         assert_eq!(gltf_material("asphalt").1, MAT_ASPHALT);
         assert_eq!(gltf_material("curtain_wall").1, MAT_CURTAIN_WALL);
         assert_eq!(gltf_material("emissive_window").1, MAT_EMISSIVE_WINDOW);
+        assert_eq!(gltf_material("road").1, MAT_ASPHALT);
+        assert_eq!(gltf_material("brick_facade").1, MAT_BRICK);
+        assert_eq!(gltf_material("glass_facade").1, MAT_CURTAIN_WALL);
+        assert_eq!(gltf_material("metal_dark").1, MAT_METAL);
+        assert_eq!(gltf_material("rooftop").1, MAT_ROOF_TAR);
+        assert_eq!(gltf_material("signage").1, MAT_EMISSIVE_WINDOW);
+        assert_eq!(gltf_material("foliage").1, MAT_FOLIAGE);
+        assert_eq!(gltf_material("sidewalk").1, MAT_CONCRETE);
         assert_eq!(gltf_material("unknown").1, MAT_CONCRETE);
     }
 }
