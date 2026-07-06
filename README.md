@@ -50,7 +50,18 @@ WEBGPU_CITY_GLTF_URL=https://example.com/models/city.glb cargo run
 WEBGPU_CITY_GLTF_URL=./models/city.glb cargo run
 ```
 
-WebAssembly / Trunk 執行時沒有 runtime 環境變數；請在建置時提供 `WEBGPU_CITY_GLTF_URL`，或在頁面 URL 上加上 `city` / `city_gltf_url` query 參數：
+也可以在 repo 根目錄建立 `.env`，讓原生執行與 Trunk / wasm 建置時自動帶入同一個模型來源：
+
+```dotenv
+WEBGPU_CITY_GLTF_URL=https://example.com/models/city.glb
+```
+
+```bash
+cargo run
+trunk serve --open
+```
+
+WebAssembly / Trunk 執行時沒有 runtime 環境變數；請在 `.env` 或建置環境提供 `WEBGPU_CITY_GLTF_URL`，或在頁面 URL 上加上 `city` / `city_gltf_url` query 參數：
 
 ```bash
 WEBGPU_CITY_GLTF_URL=https://example.com/models/city.glb trunk serve --open

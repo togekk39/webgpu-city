@@ -185,8 +185,9 @@ impl MaterialTexture {
 async fn download_city_gltf_bytes() -> Vec<u8> {
     let source = std::env::var(CITY_URL_ENV)
         .ok()
+        .or_else(dotenv_city_gltf_source)
         .or_else(|| CITY_URL.map(str::to_owned))
-        .expect("set WEBGPU_CITY_GLTF_URL to a .glb/.gltf download URL or local file path");
+        .expect("set WEBGPU_CITY_GLTF_URL in the environment, .env, or build environment to a .glb/.gltf download URL or local file path");
 
     if source.starts_with("http://") || source.starts_with("https://") {
         let response = reqwest::blocking::get(&source).expect("download city glTF/GLB");
@@ -199,6 +200,23 @@ async fn download_city_gltf_bytes() -> Vec<u8> {
     } else {
         std::fs::read(&source).expect("read city glTF/GLB file path")
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dotenv_city_gltf_source() -> Option<String> {
+    let contents = std::fs::read_to_string(".env").ok()?;
+    contents.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let (name, value) = line.split_once('=')?;
+        if name.trim() == CITY_URL_ENV {
+            Some(value.trim().trim_matches(['\"', '\'']).to_owned())
+        } else {
+            None
+        }
+    })
 }
 
 #[cfg(target_arch = "wasm32")]
