@@ -619,6 +619,8 @@ struct State {
     render_scale: f32,
     clock: AppClock,
     camera: CameraController,
+    paused_elapsed: Option<f32>,
+    elapsed_offset: f32,
 }
 
 impl State {
@@ -942,6 +944,8 @@ impl State {
             render_scale,
             clock: AppClock::new(),
             camera,
+            paused_elapsed: None,
+            elapsed_offset: 0.0,
         }
     }
 
@@ -959,7 +963,7 @@ impl State {
     }
 
     fn update(&self) {
-        let elapsed = self.clock.elapsed_secs();
+        let elapsed = self.display_elapsed();
         let (view_proj, eye) = self
             .camera
             .matrix(self.config.width, self.config.height, elapsed);
@@ -973,16 +977,40 @@ impl State {
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
 
+    fn display_elapsed(&self) -> f32 {
+        self.paused_elapsed
+            .unwrap_or_else(|| self.clock.elapsed_secs() - self.elapsed_offset)
+    }
+
+    fn toggle_motion_pause(&mut self) {
+        if let Some(paused_elapsed) = self.paused_elapsed.take() {
+            self.elapsed_offset += self.clock.elapsed_secs() - self.elapsed_offset - paused_elapsed;
+        } else {
+            self.paused_elapsed = Some(self.display_elapsed());
+            self.camera.cancel_pointer_motion();
+        }
+    }
+
     fn handle_cursor_moved(&mut self, position: PhysicalPosition<f64>) {
-        self.camera.handle_cursor_moved(position);
+        if self.paused_elapsed.is_none() {
+            self.camera.handle_cursor_moved(position);
+        }
     }
 
     fn handle_mouse_input(&mut self, button: MouseButton, state: ElementState) {
-        self.camera.handle_mouse_input(button, state);
+        if button == MouseButton::Left && state == ElementState::Pressed {
+            self.toggle_motion_pause();
+        }
+
+        if self.paused_elapsed.is_none() {
+            self.camera.handle_mouse_input(button, state);
+        }
     }
 
     fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        self.camera.handle_mouse_wheel(delta);
+        if self.paused_elapsed.is_none() {
+            self.camera.handle_mouse_wheel(delta);
+        }
     }
 
     fn render(&mut self) -> RenderOutcome {
@@ -1193,6 +1221,11 @@ impl CameraController {
                 self.last_cursor = None;
             }
         }
+    }
+
+    fn cancel_pointer_motion(&mut self) {
+        self.left_dragging = false;
+        self.last_cursor = None;
     }
 
     fn handle_mouse_wheel(&mut self, delta: MouseScrollDelta) {
