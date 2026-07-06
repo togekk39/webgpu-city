@@ -40,7 +40,7 @@ cargo install trunk
 
 ## 城市模型下載設定（`WEBGPU_CITY_GLTF_URL`）
 
-原生執行時，城市模型不再內建於 repo；啟動前必須用 `WEBGPU_CITY_GLTF_URL` 指定模型來源。此值可以是 HTTP(S) 下載連結，也可以是本機檔案路徑：
+城市模型不再內建於 repo。原生執行時，啟動前必須用 `WEBGPU_CITY_GLTF_URL` 指定模型來源；此值可以是 HTTP(S) 下載連結，也可以是本機檔案路徑：
 
 ```bash
 # 從下載連結載入 GLB / glTF
@@ -48,6 +48,15 @@ WEBGPU_CITY_GLTF_URL=https://example.com/models/city.glb cargo run
 
 # 或從本機檔案載入
 WEBGPU_CITY_GLTF_URL=./models/city.glb cargo run
+```
+
+WebAssembly / Trunk 執行時沒有 runtime 環境變數；請在建置時提供 `WEBGPU_CITY_GLTF_URL`，或在頁面 URL 上加上 `city` / `city_gltf_url` query 參數：
+
+```bash
+WEBGPU_CITY_GLTF_URL=https://example.com/models/city.glb trunk serve --open
+
+# 或啟動後開啟類似：
+# http://127.0.0.1:3000/?city=https%3A%2F%2Fexample.com%2Fmodels%2Fcity.glb
 ```
 
 目前載入器預期模型的 geometry buffer 內嵌在 GLB binary buffer 中；PNG 材質支援 GLB 內嵌的 `image/png` base-color texture。若模型使用材質名稱，程式會將常見名稱（例如 `asphalt`、`brick`、`curtain_wall`、`emissive_window`、`metal`、`roof_tar`、`solar`）映射到既有 shader 材質效果；未知材質名稱會以 concrete 材質處理。

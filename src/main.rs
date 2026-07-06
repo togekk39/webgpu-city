@@ -14,7 +14,7 @@ use winit::{
 };
 
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::{JsCast, prelude::wasm_bindgen};
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
 
@@ -182,7 +182,7 @@ impl MaterialTexture {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn download_city_gltf_bytes() -> Vec<u8> {
+async fn download_city_gltf_bytes() -> Vec<u8> {
     let source = std::env::var(CITY_URL_ENV)
         .ok()
         .or_else(|| CITY_URL.map(str::to_owned))
@@ -202,8 +202,42 @@ fn download_city_gltf_bytes() -> Vec<u8> {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn download_city_gltf_bytes() -> Vec<u8> {
-    panic!("WEBGPU_CITY_GLTF_URL downloads are currently supported by the native build");
+async fn download_city_gltf_bytes() -> Vec<u8> {
+    let source = wasm_city_gltf_source()
+        .expect("set WEBGPU_CITY_GLTF_URL at build time or add ?city=<glb-url> to the page URL");
+    let window = web_sys::window().expect("browser window");
+    let response_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(&source))
+        .await
+        .expect("download city glTF/GLB");
+    let response: web_sys::Response = response_value
+        .dyn_into()
+        .expect("city glTF/GLB download response");
+    let array_buffer = wasm_bindgen_futures::JsFuture::from(
+        response
+            .array_buffer()
+            .expect("read city glTF/GLB response as ArrayBuffer"),
+    )
+    .await
+    .expect("read city glTF/GLB download body");
+
+    js_sys::Uint8Array::new(&array_buffer).to_vec()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_city_gltf_source() -> Option<String> {
+    if let Some(source) = option_env!("WEBGPU_CITY_GLTF_URL") {
+        return Some(source.to_owned());
+    }
+
+    let search = web_sys::window()?.location().search().ok()?;
+    for pair in search.trim_start_matches('?').split('&') {
+        let (key, value) = pair.split_once('=')?;
+        if key == "city" || key == "city_gltf_url" {
+            return Some(value.replace("%3A", ":").replace("%2F", "/"));
+        }
+    }
+
+    None
 }
 
 fn decode_embedded_png_texture(bytes: &[u8]) -> Option<MaterialTexture> {
@@ -229,8 +263,8 @@ fn embedded_image_bytes<'a>(image: gltf::image::Image<'a>, blob: &'a [u8]) -> Op
     }
 }
 
-fn load_city_gltf_mesh() -> Mesh {
-    let bytes = download_city_gltf_bytes();
+async fn load_city_gltf_mesh() -> Mesh {
+    let bytes = download_city_gltf_bytes().await;
     load_city_gltf_mesh_from_slice(&bytes)
 }
 
@@ -558,7 +592,7 @@ impl State {
         let hdr_width = scaled_extent(config.width, render_scale);
         let hdr_height = scaled_extent(config.height, render_scale);
 
-        let mesh = build_city_mesh();
+        let mesh = build_city_mesh().await;
         eprintln!(
             "city stats: vertices={} indices={} draw_calls=4 shadow_map=2048(default)/1024(fallback) render_scale={:0.2} postprocess=targeted_bloom+filmic",
             mesh.vertices.len(),
@@ -1241,8 +1275,8 @@ const MAT_FOLIAGE: f32 = 9.0;
 const MAT_ROOF_TAR: f32 = 10.0;
 const MAT_SOLAR: f32 = 11.0;
 
-fn build_city_mesh() -> Mesh {
-    load_city_gltf_mesh()
+async fn build_city_mesh() -> Mesh {
+    load_city_gltf_mesh().await
 }
 
 #[derive(Default)]
