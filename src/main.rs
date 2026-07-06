@@ -1124,7 +1124,6 @@ impl State {
             bind_group_layouts: &[
                 Some(&uniform_layout),
                 Some(&shadow_layout),
-                Some(&post_layout),
                 Some(&material_layout),
             ],
             immediate_size: 0,
@@ -1233,6 +1232,7 @@ impl State {
             bind_group_layouts: &[
                 Some(&uniform_layout),
                 Some(&shadow_layout),
+                Some(&material_layout),
                 Some(&post_layout),
             ],
             immediate_size: 0,
@@ -1449,7 +1449,7 @@ impl State {
             pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             for submesh in &self.submeshes {
                 pass.set_bind_group(
-                    3,
+                    2,
                     &self.gpu_materials[submesh.material_index].bind_group,
                     &[],
                 );
@@ -1480,7 +1480,8 @@ impl State {
             pass.set_pipeline(&self.post_pipeline);
             pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             pass.set_bind_group(1, &self.shadow_bind_group, &[]);
-            pass.set_bind_group(2, &self.hdr.bind_group, &[]);
+            pass.set_bind_group(2, &self.gpu_materials[0].bind_group, &[]);
+            pass.set_bind_group(3, &self.hdr.bind_group, &[]);
             pass.draw(0..3, 0..1);
         }
         self.queue.submit(Some(encoder.finish()));

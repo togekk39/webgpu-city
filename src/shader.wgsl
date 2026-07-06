@@ -25,20 +25,20 @@ struct MaterialUniform {
     material: vec4<f32>,
 };
 
-@group(3) @binding(0)
+@group(2) @binding(0)
 var<uniform> material_uniform: MaterialUniform;
-@group(3) @binding(1)
+@group(2) @binding(1)
 var base_color_texture: texture_2d<f32>;
-@group(3) @binding(2)
+@group(2) @binding(2)
 var material_sampler: sampler;
-@group(3) @binding(3)
+@group(2) @binding(3)
 var normal_texture: texture_2d<f32>;
-@group(3) @binding(4)
+@group(2) @binding(4)
 var emissive_texture: texture_2d<f32>;
 
-@group(2) @binding(0)
+@group(3) @binding(0)
 var hdr_scene: texture_2d<f32>;
-@group(2) @binding(1)
+@group(3) @binding(1)
 var hdr_sampler: sampler;
 
 struct VertexInput {
