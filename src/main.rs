@@ -230,6 +230,12 @@ async fn download_city_gltf_bytes() -> Vec<u8> {
     let response: web_sys::Response = response_value
         .dyn_into()
         .expect("city glTF/GLB download response");
+    if !response.ok() {
+        panic!(
+            "city glTF/GLB fetch failed with HTTP status {} for {source}",
+            response.status()
+        );
+    }
     let array_buffer = wasm_bindgen_futures::JsFuture::from(
         response
             .array_buffer()
