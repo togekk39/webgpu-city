@@ -1,3 +1,4 @@
+use base64::Engine;
 use cgmath::{Deg, InnerSpace, Matrix4, Point3, SquareMatrix, Vector3, ortho, perspective};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -14,7 +15,7 @@ use winit::{
 };
 
 #[cfg(target_arch = "wasm32")]
-use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::{JsCast, prelude::wasm_bindgen};
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys};
 
@@ -134,291 +135,329 @@ impl Mesh {
             indices: Vec::new(),
         }
     }
+}
 
-    fn add_beveled_box(
-        &mut self,
-        center: [f32; 3],
-        size: [f32; 3],
-        bevel: f32,
-        color: [f32; 3],
-        material_id: f32,
-    ) {
-        let [cx, cy, cz] = center;
-        let [hx, hy, hz] = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
-        let b = bevel.min(hx * 0.35).min(hy * 0.35).min(hz * 0.35).max(0.0);
-        if b <= 0.001 {
-            self.add_box(center, size, color, material_id);
-            return;
+#[cfg(not(target_arch = "wasm32"))]
+const CITY_URL_ENV: &str = "WEBGPU_CITY_GLTF_URL";
+
+#[cfg(not(target_arch = "wasm32"))]
+const CITY_URL: Option<&str> = option_env!("WEBGPU_CITY_GLTF_URL");
+
+fn gltf_material(name: &str) -> ([f32; 3], f32) {
+    match name {
+        "asphalt" => ([0.018, 0.018, 0.017], MAT_ASPHALT),
+        "brick" => ([0.25, 0.12, 0.08], MAT_BRICK),
+        "curtain_wall" => ([0.035, 0.075, 0.105], MAT_CURTAIN_WALL),
+        "emissive_window" => ([0.78, 0.42, 0.18], MAT_EMISSIVE_WINDOW),
+        "glass" | "window" => ([0.025, 0.045, 0.062], MAT_WINDOW_PANE),
+        "metal" => ([0.18, 0.18, 0.17], MAT_METAL),
+        "roof_tar" => ([0.04, 0.038, 0.035], MAT_ROOF_TAR),
+        "solar" => ([0.025, 0.035, 0.045], MAT_SOLAR),
+        _ => ([0.28, 0.26, 0.23], MAT_CONCRETE),
+    }
+}
+
+struct MaterialTexture {
+    pixels: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+impl MaterialTexture {
+    fn sample(&self, uv: [f32; 2]) -> [f32; 3] {
+        let u = uv[0].rem_euclid(1.0);
+        let v = uv[1].rem_euclid(1.0);
+        let x = (u * self.width as f32)
+            .floor()
+            .clamp(0.0, self.width.saturating_sub(1) as f32) as u32;
+        let y = ((1.0 - v) * self.height as f32)
+            .floor()
+            .clamp(0.0, self.height.saturating_sub(1) as f32) as u32;
+        let offset = ((y * self.width + x) * 4) as usize;
+        [
+            self.pixels[offset] as f32 / 255.0,
+            self.pixels[offset + 1] as f32 / 255.0,
+            self.pixels[offset + 2] as f32 / 255.0,
+        ]
+    }
+}
+
+struct GltfAsset {
+    bytes: Vec<u8>,
+    source: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn download_city_gltf_asset() -> GltfAsset {
+    let source = std::env::var(CITY_URL_ENV)
+        .ok()
+        .or_else(dotenv_city_gltf_source)
+        .or_else(|| CITY_URL.map(str::to_owned))
+        .expect("set WEBGPU_CITY_GLTF_URL in the environment, .env, or build environment to a .glb/.gltf download URL or local file path");
+
+    if source.starts_with("http://") || source.starts_with("https://") {
+        let response = reqwest::blocking::get(&source).expect("download city glTF/GLB");
+        let bytes = response
+            .error_for_status()
+            .expect("city glTF/GLB download returned an error status")
+            .bytes()
+            .expect("read city glTF/GLB download body")
+            .to_vec();
+        GltfAsset { bytes, source }
+    } else {
+        let bytes = std::fs::read(&source).expect("read city glTF/GLB file path");
+        GltfAsset { bytes, source }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dotenv_city_gltf_source() -> Option<String> {
+    let contents = std::fs::read_to_string(".env").ok()?;
+    contents.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
         }
-        let xs = [cx - hx, cx - hx + b, cx + hx - b, cx + hx];
-        let ys = [cy - hy, cy - hy + b, cy + hy - b, cy + hy];
-        let zs = [cz - hz, cz - hz + b, cz + hz - b, cz + hz];
-        let mut quad = |pts: [[f32; 3]; 4], normal: [f32; 3], uv: [f32; 2]| {
-            let base = self.vertices.len() as u32;
-            let uvs = [[0.0, 0.0], [uv[0], 0.0], [uv[0], uv[1]], [0.0, uv[1]]];
-            for i in 0..4 {
-                self.vertices.push(Vertex {
-                    position: pts[i],
-                    color,
-                    normal,
-                    uv: uvs[i],
-                    material_id,
-                });
-            }
-            self.indices
-                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        };
-        quad(
-            [
-                [xs[1], ys[0], zs[3]],
-                [xs[2], ys[0], zs[3]],
-                [xs[2], ys[3], zs[3]],
-                [xs[1], ys[3], zs[3]],
-            ],
-            [0.0, 0.0, 1.0],
-            [size[0], size[1]],
-        );
-        quad(
-            [
-                [xs[2], ys[0], zs[0]],
-                [xs[1], ys[0], zs[0]],
-                [xs[1], ys[3], zs[0]],
-                [xs[2], ys[3], zs[0]],
-            ],
-            [0.0, 0.0, -1.0],
-            [size[0], size[1]],
-        );
-        quad(
-            [
-                [xs[0], ys[0], zs[1]],
-                [xs[0], ys[0], zs[2]],
-                [xs[0], ys[3], zs[2]],
-                [xs[0], ys[3], zs[1]],
-            ],
-            [-1.0, 0.0, 0.0],
-            [size[2], size[1]],
-        );
-        quad(
-            [
-                [xs[3], ys[0], zs[2]],
-                [xs[3], ys[0], zs[1]],
-                [xs[3], ys[3], zs[1]],
-                [xs[3], ys[3], zs[2]],
-            ],
-            [1.0, 0.0, 0.0],
-            [size[2], size[1]],
-        );
-        quad(
-            [
-                [xs[1], ys[3], zs[3]],
-                [xs[2], ys[3], zs[3]],
-                [xs[2], ys[3], zs[0]],
-                [xs[1], ys[3], zs[0]],
-            ],
-            [0.0, 1.0, 0.0],
-            [size[0], size[2]],
-        );
-        quad(
-            [
-                [xs[1], ys[0], zs[0]],
-                [xs[2], ys[0], zs[0]],
-                [xs[2], ys[0], zs[3]],
-                [xs[1], ys[0], zs[3]],
-            ],
-            [0.0, -1.0, 0.0],
-            [size[0], size[2]],
-        );
-        let n = 0.70710677;
-        for &(z0, z1, nz) in &[(zs[2], zs[3], n), (zs[0], zs[1], -n)] {
-            quad(
-                [
-                    [xs[0], ys[1], z1],
-                    [xs[1], ys[0], z0],
-                    [xs[1], ys[3], z0],
-                    [xs[0], ys[2], z1],
-                ],
-                [-n, 0.0, nz],
-                [b, size[1]],
-            );
-            quad(
-                [
-                    [xs[2], ys[0], z0],
-                    [xs[3], ys[1], z1],
-                    [xs[3], ys[2], z1],
-                    [xs[2], ys[3], z0],
-                ],
-                [n, 0.0, nz],
-                [b, size[1]],
-            );
+        let (name, value) = line.split_once('=')?;
+        if name.trim() == CITY_URL_ENV {
+            Some(value.trim().trim_matches(['\"', '\'']).to_owned())
+        } else {
+            None
         }
-        for &(y0, y1, ny) in &[(ys[2], ys[3], n), (ys[0], ys[1], -n)] {
-            quad(
-                [
-                    [xs[1], y1, zs[3]],
-                    [xs[2], y1, zs[3]],
-                    [xs[2], y0, zs[2]],
-                    [xs[1], y0, zs[2]],
-                ],
-                [0.0, ny, n],
-                [size[0], b],
-            );
-            quad(
-                [
-                    [xs[2], y1, zs[0]],
-                    [xs[1], y1, zs[0]],
-                    [xs[1], y0, zs[1]],
-                    [xs[2], y0, zs[1]],
-                ],
-                [0.0, ny, -n],
-                [size[0], b],
-            );
-            quad(
-                [
-                    [xs[0], y1, zs[1]],
-                    [xs[0], y1, zs[2]],
-                    [xs[1], y0, zs[2]],
-                    [xs[1], y0, zs[1]],
-                ],
-                [-n, ny, 0.0],
-                [size[2], b],
-            );
-            quad(
-                [
-                    [xs[3], y1, zs[2]],
-                    [xs[3], y1, zs[1]],
-                    [xs[2], y0, zs[1]],
-                    [xs[2], y0, zs[2]],
-                ],
-                [n, ny, 0.0],
-                [size[2], b],
-            );
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn download_city_gltf_asset() -> GltfAsset {
+    let source = wasm_city_gltf_source()
+        .expect("set WEBGPU_CITY_GLTF_URL at build time or add ?city=<glb-url> to the page URL");
+    let window = web_sys::window().expect("browser window");
+    let response_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(&source))
+        .await
+        .expect("download city glTF/GLB");
+    let response: web_sys::Response = response_value
+        .dyn_into()
+        .expect("city glTF/GLB download response");
+    if !response.ok() {
+        panic!(
+            "city glTF/GLB fetch failed with HTTP status {} for {source}",
+            response.status()
+        );
+    }
+    let array_buffer = wasm_bindgen_futures::JsFuture::from(
+        response
+            .array_buffer()
+            .expect("read city glTF/GLB response as ArrayBuffer"),
+    )
+    .await
+    .expect("read city glTF/GLB download body");
+
+    GltfAsset {
+        bytes: js_sys::Uint8Array::new(&array_buffer).to_vec(),
+        source,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_city_gltf_source() -> Option<String> {
+    if let Some(source) = option_env!("WEBGPU_CITY_GLTF_URL") {
+        return Some(source.to_owned());
+    }
+
+    let search = web_sys::window()?.location().search().ok()?;
+    for pair in search.trim_start_matches('?').split('&') {
+        let (key, value) = pair.split_once('=')?;
+        if key == "city" || key == "city_gltf_url" {
+            return Some(value.replace("%3A", ":").replace("%2F", "/"));
         }
     }
 
-    fn add_prism(
-        &mut self,
-        center: [f32; 3],
-        radius: f32,
-        height: f32,
-        sides: u32,
-        color: [f32; 3],
-        material_id: f32,
-    ) {
-        let n = sides.max(6);
-        let [cx, cy, cz] = center;
-        for i in 0..n {
-            let a0 = i as f32 / n as f32 * std::f32::consts::TAU;
-            let a1 = (i + 1) as f32 / n as f32 * std::f32::consts::TAU;
-            let (x0, z0) = (cx + a0.cos() * radius, cz + a0.sin() * radius);
-            let (x1, z1) = (cx + a1.cos() * radius, cz + a1.sin() * radius);
-            let mid = (a0 + a1) * 0.5;
-            let normal = Vector3::new(mid.cos(), 0.0, mid.sin()).normalize();
-            let base = self.vertices.len() as u32;
-            for p in [
-                [x0, cy - height * 0.5, z0],
-                [x1, cy - height * 0.5, z1],
-                [x1, cy + height * 0.5, z1],
-                [x0, cy + height * 0.5, z0],
-            ] {
-                self.vertices.push(Vertex {
-                    position: p,
-                    color,
-                    normal: normal.into(),
-                    uv: [0.0, 0.0],
-                    material_id,
-                });
+    None
+}
+
+fn decode_png_texture(bytes: &[u8]) -> Option<MaterialTexture> {
+    let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+        .ok()?
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    Some(MaterialTexture {
+        pixels: image.into_raw(),
+        width,
+        height,
+    })
+}
+
+fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
+    let (metadata, data) = uri.split_once(',')?;
+    if !metadata.starts_with("data:") || !metadata.ends_with(";base64") {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD.decode(data).ok()
+}
+
+fn resolve_relative_uri(base: &str, uri: &str) -> String {
+    if uri.starts_with("http://") || uri.starts_with("https://") || uri.starts_with("data:") {
+        return uri.to_owned();
+    }
+
+    if base.starts_with("http://") || base.starts_with("https://") {
+        let prefix = base
+            .rsplit_once('/')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or(base);
+        format!("{prefix}/{uri}")
+    } else {
+        std::path::Path::new(base)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(uri)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn external_resource_bytes(uri: &str) -> Option<Vec<u8>> {
+    if let Some(bytes) = decode_data_uri(uri) {
+        return Some(bytes);
+    }
+    if uri.starts_with("http://") || uri.starts_with("https://") {
+        reqwest::blocking::get(uri)
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .bytes()
+            .ok()
+            .map(|bytes| bytes.to_vec())
+    } else {
+        std::fs::read(uri).ok()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn external_resource_bytes(uri: &str) -> Option<Vec<u8>> {
+    if let Some(bytes) = decode_data_uri(uri) {
+        return Some(bytes);
+    }
+    let window = web_sys::window()?;
+    let response_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(uri))
+        .await
+        .ok()?;
+    let response: web_sys::Response = response_value.dyn_into().ok()?;
+    if !response.ok() {
+        return None;
+    }
+    let array_buffer = wasm_bindgen_futures::JsFuture::from(response.array_buffer().ok()?)
+        .await
+        .ok()?;
+    Some(js_sys::Uint8Array::new(&array_buffer).to_vec())
+}
+
+async fn load_gltf_image_texture(
+    image: gltf::image::Image<'_>,
+    blob: &[u8],
+    asset_source: &str,
+) -> Option<MaterialTexture> {
+    match image.source() {
+        gltf::image::Source::View { view, mime_type } if mime_type == "image/png" => {
+            let start = view.offset();
+            let end = start + view.length();
+            blob.get(start..end).and_then(decode_png_texture)
+        }
+        gltf::image::Source::Uri { uri, mime_type }
+            if mime_type == Some("image/png")
+                || uri.ends_with(".png")
+                || uri.starts_with("data:image/png") =>
+        {
+            let uri = resolve_relative_uri(asset_source, uri);
+            external_resource_bytes(&uri)
+                .await
+                .as_deref()
+                .and_then(decode_png_texture)
+        }
+        _ => None,
+    }
+}
+
+async fn load_city_gltf_mesh() -> Mesh {
+    let asset = download_city_gltf_asset().await;
+    load_city_gltf_mesh_from_slice(&asset.bytes, &asset.source).await
+}
+
+async fn load_city_gltf_mesh_from_slice(bytes: &[u8], asset_source: &str) -> Mesh {
+    let gltf = gltf::Gltf::from_slice(bytes).expect("parse downloaded city glTF/GLB");
+    let blob = gltf
+        .blob
+        .as_deref()
+        .expect("downloaded city GLB must contain an embedded binary buffer");
+    let mut images: Vec<Option<MaterialTexture>> = Vec::new();
+    for image in gltf.images() {
+        images.push(load_gltf_image_texture(image, blob, asset_source).await);
+    }
+    let mut mesh = Mesh::new();
+
+    for gltf_mesh in gltf.meshes() {
+        for primitive in gltf_mesh.primitives() {
+            let reader = primitive.reader(|buffer| (buffer.index() == 0).then_some(blob));
+            let Some(positions) = reader.read_positions() else {
+                continue;
+            };
+            let positions: Vec<[f32; 3]> = positions.collect();
+            let normals: Option<Vec<[f32; 3]>> =
+                reader.read_normals().map(|normals| normals.collect());
+            let texcoords: Option<Vec<[f32; 2]>> = reader
+                .read_tex_coords(0)
+                .map(|texcoords| texcoords.into_f32().collect());
+            let indices: Vec<u32> = reader
+                .read_indices()
+                .map(|indices| indices.into_u32().collect())
+                .unwrap_or_else(|| (0..positions.len() as u32).collect());
+            let material_doc = primitive.material();
+            let material = material_doc
+                .name()
+                .map(gltf_material)
+                .unwrap_or_else(|| gltf_material("concrete"));
+            let texture = material_doc
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .and_then(|info| images.get(info.texture().source().index()))
+                .and_then(Option::as_ref);
+
+            for triangle in indices.chunks_exact(3) {
+                let p0: Vector3<f32> = positions[triangle[0] as usize].into();
+                let p1: Vector3<f32> = positions[triangle[1] as usize].into();
+                let p2: Vector3<f32> = positions[triangle[2] as usize].into();
+                let face_normal = (p1 - p0).cross(p2 - p0).normalize();
+                let base = mesh.vertices.len() as u32;
+
+                for index in triangle {
+                    let index = *index as usize;
+                    let normal = normals
+                        .as_ref()
+                        .and_then(|normals| normals.get(index).copied())
+                        .unwrap_or_else(|| face_normal.into());
+                    let uv = texcoords
+                        .as_ref()
+                        .and_then(|texcoords| texcoords.get(index).copied())
+                        .unwrap_or([positions[index][0], positions[index][2]]);
+                    let texture_color = texture
+                        .map(|texture| texture.sample(uv))
+                        .unwrap_or(material.0);
+                    mesh.vertices.push(Vertex {
+                        position: positions[index],
+                        color: texture_color,
+                        normal,
+                        uv,
+                        material_id: material.1,
+                    });
+                }
+
+                mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
             }
-            self.indices
-                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
     }
 
-    fn add_box(&mut self, center: [f32; 3], size: [f32; 3], color: [f32; 3], material_id: f32) {
-        let [cx, cy, cz] = center;
-        let [hx, hy, hz] = [size[0] * 0.5, size[1] * 0.5, size[2] * 0.5];
-        let faces = [
-            (
-                [
-                    [cx - hx, cy - hy, cz + hz],
-                    [cx + hx, cy - hy, cz + hz],
-                    [cx + hx, cy + hy, cz + hz],
-                    [cx - hx, cy + hy, cz + hz],
-                ],
-                [0.0, 0.0, 1.0],
-                [size[0], size[1]],
-            ),
-            (
-                [
-                    [cx + hx, cy - hy, cz - hz],
-                    [cx - hx, cy - hy, cz - hz],
-                    [cx - hx, cy + hy, cz - hz],
-                    [cx + hx, cy + hy, cz - hz],
-                ],
-                [0.0, 0.0, -1.0],
-                [size[0], size[1]],
-            ),
-            (
-                [
-                    [cx - hx, cy - hy, cz - hz],
-                    [cx - hx, cy - hy, cz + hz],
-                    [cx - hx, cy + hy, cz + hz],
-                    [cx - hx, cy + hy, cz - hz],
-                ],
-                [-1.0, 0.0, 0.0],
-                [size[2], size[1]],
-            ),
-            (
-                [
-                    [cx + hx, cy - hy, cz + hz],
-                    [cx + hx, cy - hy, cz - hz],
-                    [cx + hx, cy + hy, cz - hz],
-                    [cx + hx, cy + hy, cz + hz],
-                ],
-                [1.0, 0.0, 0.0],
-                [size[2], size[1]],
-            ),
-            (
-                [
-                    [cx - hx, cy + hy, cz + hz],
-                    [cx + hx, cy + hy, cz + hz],
-                    [cx + hx, cy + hy, cz - hz],
-                    [cx - hx, cy + hy, cz - hz],
-                ],
-                [0.0, 1.0, 0.0],
-                [size[0], size[2]],
-            ),
-            (
-                [
-                    [cx - hx, cy - hy, cz - hz],
-                    [cx + hx, cy - hy, cz - hz],
-                    [cx + hx, cy - hy, cz + hz],
-                    [cx - hx, cy - hy, cz + hz],
-                ],
-                [0.0, -1.0, 0.0],
-                [size[0], size[2]],
-            ),
-        ];
-        for (corners, normal, uv_scale) in faces {
-            let base = self.vertices.len() as u32;
-            let uvs = [
-                [0.0, 0.0],
-                [uv_scale[0], 0.0],
-                [uv_scale[0], uv_scale[1]],
-                [0.0, uv_scale[1]],
-            ];
-            for i in 0..4 {
-                self.vertices.push(Vertex {
-                    position: corners[i],
-                    color,
-                    normal,
-                    uv: uvs[i],
-                    material_id,
-                });
-            }
-            self.indices
-                .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        }
-    }
+    mesh
 }
 
 struct DepthTexture {
@@ -669,7 +708,7 @@ impl State {
         let hdr_width = scaled_extent(config.width, render_scale);
         let hdr_height = scaled_extent(config.height, render_scale);
 
-        let mesh = build_city_mesh();
+        let mesh = build_city_mesh().await;
         eprintln!(
             "city stats: vertices={} indices={} draw_calls=4 shadow_map=2048(default)/1024(fallback) render_scale={:0.2} postprocess=targeted_bloom+filmic",
             mesh.vertices.len(),
@@ -1343,7 +1382,6 @@ const MAT_CONCRETE: f32 = 1.0;
 const MAT_BRICK: f32 = 2.0;
 const MAT_WINDOW_PANE: f32 = 3.0;
 const MAT_CURTAIN_WALL: f32 = 4.0;
-const MAT_SHOP_GLASS: f32 = 5.0;
 const MAT_EMISSIVE_WINDOW: f32 = 6.0;
 const MAT_METAL: f32 = 7.0;
 #[allow(dead_code)]
@@ -1353,833 +1391,8 @@ const MAT_FOLIAGE: f32 = 9.0;
 const MAT_ROOF_TAR: f32 = 10.0;
 const MAT_SOLAR: f32 = 11.0;
 
-#[derive(Clone, Copy)]
-enum FacadeKind {
-    OldApartment,
-    GlassOffice,
-    MixedUse,
-    LowShop,
-    Corner,
-    Tower,
-}
-
-fn facade_color(kind: FacadeKind, seed: i32) -> ([f32; 3], f32) {
-    let wobble = ((seed * 37).rem_euclid(17) as f32) * 0.006;
-    match kind {
-        FacadeKind::OldApartment => ([0.34 + wobble, 0.18 + wobble, 0.12 + wobble], MAT_BRICK),
-        FacadeKind::GlassOffice => ([0.07, 0.13 + wobble, 0.18 + wobble], MAT_CURTAIN_WALL),
-        FacadeKind::MixedUse => ([0.30 + wobble, 0.26 + wobble, 0.21 + wobble], MAT_CONCRETE),
-        FacadeKind::LowShop => ([0.45 + wobble, 0.36 + wobble, 0.26 + wobble], MAT_CONCRETE),
-        FacadeKind::Corner => ([0.22 + wobble, 0.16 + wobble, 0.14 + wobble], MAT_BRICK),
-        FacadeKind::Tower => ([0.10, 0.16 + wobble, 0.25 + wobble], MAT_CURTAIN_WALL),
-    }
-}
-
-fn window_lit(seed: i32, bay: i32, floor: i32) -> bool {
-    let floor_cluster = (seed + floor * 17).rem_euclid(11) < 3;
-    let dark_side = (seed + bay * 5).rem_euclid(13) < 2;
-    let resident = (seed * 31 + bay * 19 + floor * 23).rem_euclid(17) == 0;
-    (floor_cluster && !dark_side && (bay + seed).rem_euclid(3) != 0) || resident
-}
-
-fn add_panel_window(mesh: &mut Mesh, pos: [f32; 3], size: [f32; 3], lit: bool) {
-    mesh.add_box(
-        pos,
-        [size[0] + 0.07, size[1] + 0.07, size[2]],
-        [0.025, 0.027, 0.030],
-        MAT_METAL,
-    );
-    mesh.add_box(
-        [pos[0], pos[1], pos[2] + size[2] * 0.35],
-        size,
-        if lit {
-            [0.78, 0.42, 0.18]
-        } else {
-            [0.025, 0.045, 0.062]
-        },
-        if lit {
-            MAT_EMISSIVE_WINDOW
-        } else {
-            MAT_WINDOW_PANE
-        },
-    );
-}
-
-fn build_old_apartment(mesh: &mut Mesh, center: [f32; 3], size: [f32; 3], seed: i32) {
-    let [cx, _, cz] = center;
-    let [sx, h, sz] = size;
-    let side = if cx > 0.0 { -1.0 } else { 1.0 };
-    let fz = cz + side * sz * 0.5;
-    let color = facade_color(FacadeKind::OldApartment, seed).0;
-    mesh.add_beveled_box([cx, h * 0.5, cz], [sx, h, sz], 0.035, color, MAT_BRICK);
-    let floors = ((h - 1.1) / 0.78).max(2.0) as i32;
-    let bays = (sx / 0.48).max(3.0) as i32;
-    for f in 0..floors {
-        let y = 1.05 + f as f32 * (0.72 + ((seed + f) % 3) as f32 * 0.035);
-        if y > h - 0.35 {
-            continue;
-        };
-        mesh.add_box(
-            [cx, y - 0.34, fz + side * 0.035],
-            [sx * 0.92, 0.035, 0.05],
-            [0.16, 0.12, 0.10],
-            MAT_CONCRETE,
-        );
-        for b in 0..bays {
-            let x = cx - sx * 0.38 + (b as f32 + 0.5) * sx * 0.76 / bays as f32;
-            add_panel_window(
-                mesh,
-                [x, y, fz + side * 0.075],
-                [sx * 0.40 / bays as f32, 0.28, 0.035],
-                window_lit(seed, b, f),
-            );
-            if (seed + b * 3 + f).rem_euclid(7) == 0 {
-                mesh.add_beveled_box(
-                    [x, y - 0.25, fz + side * 0.22],
-                    [sx * 0.45 / bays as f32, 0.045, 0.32],
-                    0.01,
-                    [0.13, 0.13, 0.12],
-                    MAT_METAL,
-                );
-            }
-            if (seed + b * 5 + f).rem_euclid(13) == 0 {
-                mesh.add_box(
-                    [x + 0.18, y - 0.08, fz + side * 0.18],
-                    [0.18, 0.12, 0.10],
-                    [0.36, 0.38, 0.36],
-                    MAT_METAL,
-                );
-            }
-        }
-    }
-    mesh.add_beveled_box(
-        [cx, h + 0.10, cz],
-        [sx * 1.04, 0.20, sz * 1.03],
-        0.025,
-        [0.18, 0.18, 0.17],
-        MAT_METAL,
-    );
-}
-
-fn build_glass_office(mesh: &mut Mesh, center: [f32; 3], size: [f32; 3], seed: i32) {
-    let [cx, _, cz] = center;
-    let [sx, h, sz] = size;
-    let side = if cx > 0.0 { -1.0 } else { 1.0 };
-    let fz = cz + side * sz * 0.5;
-    mesh.add_beveled_box(
-        [cx, 0.75, cz],
-        [sx * 1.08, 1.5, sz * 1.08],
-        0.04,
-        [0.10, 0.11, 0.12],
-        MAT_CONCRETE,
-    );
-    mesh.add_beveled_box(
-        [cx, h * 0.52, cz],
-        [sx * 0.82, h - 1.2, sz * 0.86],
-        0.025,
-        [0.035, 0.075, 0.105],
-        MAT_CURTAIN_WALL,
-    );
-    mesh.add_box(
-        [cx, h * 0.52, fz + side * 0.05],
-        [sx * 0.76, h - 1.6, 0.05],
-        [0.035, 0.095, 0.13],
-        MAT_CURTAIN_WALL,
-    );
-    for b in 0..5 {
-        let x = cx - sx * 0.31 + b as f32 * sx * 0.155;
-        mesh.add_box(
-            [x, h * 0.52, fz + side * 0.085],
-            [0.035, h - 1.4, 0.06],
-            [0.16, 0.18, 0.18],
-            MAT_METAL,
-        );
-    }
-    for f in 0..((h / 0.9) as i32) {
-        let y = 1.5 + f as f32 * 0.9;
-        mesh.add_box(
-            [cx, y, fz + side * 0.09],
-            [sx * 0.78, 0.035, 0.065],
-            [0.18, 0.19, 0.18],
-            MAT_METAL,
-        );
-    }
-    mesh.add_beveled_box(
-        [cx, h + 0.28, cz],
-        [sx * 0.62, 0.55, sz * 0.66],
-        0.035,
-        [0.06, 0.09, 0.12],
-        MAT_CURTAIN_WALL,
-    );
-    if seed % 2 == 0 {
-        mesh.add_box(
-            [cx + sx * 0.18, h * 0.62, cz - side * sz * 0.18],
-            [sx * 0.38, h * 0.42, sz * 0.18],
-            [0.05, 0.08, 0.10],
-            MAT_CURTAIN_WALL,
-        );
-    }
-}
-
-fn build_mixed_use(mesh: &mut Mesh, center: [f32; 3], size: [f32; 3], seed: i32) {
-    let [cx, _, cz] = center;
-    let [sx, h, sz] = size;
-    let side = if cx > 0.0 { -1.0 } else { 1.0 };
-    let fz = cz + side * sz * 0.5;
-    mesh.add_beveled_box(
-        [cx, h * 0.5, cz],
-        [sx, h, sz],
-        0.035,
-        facade_color(FacadeKind::MixedUse, seed).0,
-        MAT_CONCRETE,
-    );
-    mesh.add_beveled_box(
-        [cx, 0.85, fz + side * 0.05],
-        [sx * 0.92, 1.35, 0.08],
-        0.015,
-        [0.035, 0.040, 0.045],
-        MAT_SHOP_GLASS,
-    );
-    let sign = [
-        0.25 + 0.08 * (seed % 3) as f32,
-        0.08 + 0.05 * ((seed + 1) % 3) as f32,
-        0.04,
-    ];
-    mesh.add_box(
-        [cx, 1.62, fz + side * 0.10],
-        [sx * (0.45 + 0.08 * (seed % 4) as f32), 0.26, 0.07],
-        sign,
-        MAT_EMISSIVE_WINDOW,
-    );
-    mesh.add_box(
-        [cx, 1.33, fz + side * 0.24],
-        [sx * 0.75, 0.07, 0.38],
-        [0.12, 0.06, 0.04],
-        MAT_METAL,
-    );
-    for f in 0..((h - 2.0) / 0.82).max(1.0) as i32 {
-        for b in 0..(sx / 0.55).max(2.0) as i32 {
-            let x = cx - sx * 0.32 + (b as f32 + 0.5) * sx * 0.64 / (sx / 0.55).max(2.0).floor();
-            add_panel_window(
-                mesh,
-                [x, 2.15 + f as f32 * 0.82, fz + side * 0.08],
-                [0.28, 0.25, 0.035],
-                window_lit(seed, b, f),
-            );
-        }
-    }
-}
-
-fn build_low_shop(mesh: &mut Mesh, center: [f32; 3], size: [f32; 3], seed: i32) {
-    let mut s = size;
-    s[1] = s[1].min(2.4);
-    build_mixed_use(mesh, center, s, seed);
-    let [cx, _, cz] = center;
-    mesh.add_beveled_box(
-        [cx, s[1] + 0.25, cz],
-        [s[0] * 0.72, 0.30, s[2] * 0.55],
-        0.03,
-        [0.22, 0.24, 0.24],
-        MAT_METAL,
-    );
-}
-fn build_corner(mesh: &mut Mesh, center: [f32; 3], size: [f32; 3], seed: i32) {
-    let [cx, _, cz] = center;
-    let [sx, h, sz] = size;
-    build_old_apartment(mesh, center, size, seed);
-    let side = if cx > 0.0 { -1.0 } else { 1.0 };
-    mesh.add_beveled_box(
-        [cx - side * sx * 0.38, h * 0.45, cz + sz * 0.38],
-        [sx * 0.35, h * 0.82, sz * 0.35],
-        0.04,
-        [0.19, 0.12, 0.10],
-        MAT_BRICK,
-    );
-    mesh.add_box(
-        [cx - side * sx * 0.46, 1.2, cz + sz * 0.48],
-        [0.08, 1.7, 0.9],
-        [0.025, 0.04, 0.05],
-        MAT_SHOP_GLASS,
-    );
-}
-fn build_tower(mesh: &mut Mesh, center: [f32; 3], size: [f32; 3], seed: i32) {
-    let [cx, _, cz] = center;
-    let [sx, h, sz] = size;
-    build_glass_office(mesh, [cx, 0.0, cz], [sx * 1.2, h * 0.45, sz * 1.2], seed);
-    mesh.add_beveled_box(
-        [cx, h * 0.62, cz],
-        [sx * 0.62, h * 0.78, sz * 0.62],
-        0.03,
-        [0.04, 0.08, 0.13],
-        MAT_CURTAIN_WALL,
-    );
-    mesh.add_beveled_box(
-        [cx, h + 0.45, cz],
-        [sx * 0.45, 0.9, sz * 0.45],
-        0.025,
-        [0.08, 0.10, 0.13],
-        MAT_METAL,
-    );
-    mesh.add_prism(
-        [cx, h + 1.15, cz],
-        0.035,
-        1.1,
-        8,
-        [0.7, 0.45, 0.22],
-        MAT_EMISSIVE_WINDOW,
-    );
-}
-
-fn build_building(mesh: &mut Mesh, center: [f32; 3], size: [f32; 3], kind: FacadeKind, seed: i32) {
-    match kind {
-        FacadeKind::OldApartment => build_old_apartment(mesh, center, size, seed),
-        FacadeKind::GlassOffice => build_glass_office(mesh, center, size, seed),
-        FacadeKind::MixedUse => build_mixed_use(mesh, center, size, seed),
-        FacadeKind::LowShop => build_low_shop(mesh, center, size, seed),
-        FacadeKind::Corner => build_corner(mesh, center, size, seed),
-        FacadeKind::Tower => build_tower(mesh, center, size, seed),
-    }
-}
-
-#[allow(dead_code)]
-fn build_streetlight(mesh: &mut Mesh, x: f32, z: f32) {
-    mesh.add_prism([x, 0.8, z], 0.04, 1.6, 8, [0.18, 0.16, 0.14], MAT_METAL);
-    mesh.add_box(
-        [x, 1.62, z - 0.18],
-        [0.08, 0.08, 0.34],
-        [0.18, 0.16, 0.14],
-        MAT_METAL,
-    );
-    mesh.add_box(
-        [x, 1.58, z - 0.38],
-        [0.16, 0.10, 0.10],
-        [1.0, 0.62, 0.28],
-        MAT_EMISSIVE_WINDOW,
-    );
-}
-
-fn add_rooftop_kit(mesh: &mut Mesh, cx: f32, roof_y: f32, cz: f32, sx: f32, sz: f32, seed: i32) {
-    let parapet = [0.11, 0.105, 0.095];
-    mesh.add_box(
-        [cx, roof_y + 0.22, cz - sz * 0.50],
-        [sx + 0.12, 0.44, 0.12],
-        parapet,
-        MAT_CONCRETE,
-    );
-    mesh.add_box(
-        [cx, roof_y + 0.22, cz + sz * 0.50],
-        [sx + 0.12, 0.44, 0.12],
-        parapet,
-        MAT_CONCRETE,
-    );
-    mesh.add_box(
-        [cx - sx * 0.50, roof_y + 0.22, cz],
-        [0.12, 0.44, sz],
-        parapet,
-        MAT_CONCRETE,
-    );
-    mesh.add_box(
-        [cx + sx * 0.50, roof_y + 0.22, cz],
-        [0.12, 0.44, sz],
-        parapet,
-        MAT_CONCRETE,
-    );
-    mesh.add_beveled_box(
-        [cx - sx * 0.23, roof_y + 0.18, cz + sz * 0.12],
-        [sx * 0.22, 0.20, sz * 0.28],
-        0.015,
-        [0.030, 0.028, 0.026],
-        MAT_ROOF_TAR,
-    );
-    mesh.add_beveled_box(
-        [cx + sx * 0.18, roof_y + 0.32, cz - sz * 0.18],
-        [sx * 0.20, 0.64, sz * 0.18],
-        0.025,
-        [0.22, 0.22, 0.20],
-        MAT_METAL,
-    );
-    mesh.add_prism(
-        [cx - sx * 0.34, roof_y + 0.48, cz - sz * 0.28],
-        0.20,
-        0.42,
-        12,
-        [0.30, 0.31, 0.30],
-        MAT_METAL,
-    );
-    mesh.add_prism(
-        [cx - sx * 0.34, roof_y + 0.90, cz - sz * 0.28],
-        0.13,
-        0.44,
-        12,
-        [0.08, 0.07, 0.06],
-        MAT_METAL,
-    );
-    mesh.add_beveled_box(
-        [cx + sx * 0.32, roof_y + 0.62, cz + sz * 0.26],
-        [0.50, 0.92, 0.42],
-        0.02,
-        [0.18, 0.16, 0.14],
-        MAT_BRICK,
-    );
-    mesh.add_box(
-        [cx + sx * 0.05, roof_y + 0.18, cz + sz * 0.32],
-        [sx * 0.24, 0.12, 0.18],
-        [0.09, 0.17, 0.22],
-        MAT_SOLAR,
-    );
-    mesh.add_box(
-        [cx + sx * 0.05, roof_y + 0.24, cz + sz * 0.32],
-        [sx * 0.24, 0.025, 0.19],
-        [0.025, 0.035, 0.045],
-        MAT_WINDOW_PANE,
-    );
-    for i in 0..3 {
-        let x = cx - sx * 0.30 + i as f32 * sx * 0.22;
-        mesh.add_prism(
-            [x, roof_y + 0.32, cz + sz * 0.02],
-            0.065,
-            0.42,
-            8,
-            [0.20, 0.20, 0.19],
-            MAT_METAL,
-        );
-        mesh.add_box(
-            [x, roof_y + 0.56, cz + sz * 0.02],
-            [0.24, 0.10, 0.24],
-            [0.18, 0.18, 0.17],
-            MAT_METAL,
-        );
-    }
-    if seed % 2 == 0 {
-        for i in 0..5 {
-            mesh.add_box(
-                [
-                    cx - sx * 0.40 + i as f32 * sx * 0.20,
-                    roof_y + 0.52,
-                    cz + sz * 0.48,
-                ],
-                [0.08, 0.08, 0.08],
-                [1.0, 0.55, 0.22],
-                MAT_EMISSIVE_WINDOW,
-            );
-        }
-    }
-}
-
-fn build_rooftop_foreground(mesh: &mut Mesh) {
-    let specs = [
-        (-8.2, 7.6, 10.0, 4.6, 4.2, 4.0),
-        (-2.8, 6.4, 12.6, 5.6, 3.7, 3.1),
-        (3.9, 7.2, 10.8, 5.2, 4.6, 3.7),
-        (9.3, 6.6, 8.4, 4.3, 4.0, 3.3),
-        (-11.0, 5.8, 4.6, 3.7, 4.8, 3.0),
-        (-5.0, 5.2, 5.6, 5.0, 4.5, 2.8),
-        (1.6, 5.9, 5.1, 4.8, 5.0, 3.2),
-        (7.7, 5.3, 3.2, 4.6, 4.1, 2.6),
-        (-9.2, 4.9, -0.4, 4.1, 4.2, 2.5),
-        (-3.0, 4.5, -0.9, 4.8, 3.8, 2.4),
-        (3.3, 4.8, -1.7, 5.0, 4.5, 2.9),
-        (9.6, 4.2, -2.8, 4.5, 4.0, 2.4),
-    ];
-    for (i, (x, h, z, sx, sz, base)) in specs.iter().enumerate() {
-        let mat = if i % 3 == 0 { MAT_BRICK } else { MAT_CONCRETE };
-        let col = if mat == MAT_BRICK {
-            [0.25, 0.12, 0.08]
-        } else {
-            [0.28, 0.26, 0.23]
-        };
-        mesh.add_beveled_box([*x, h * 0.5, *z], [*sx, *h, *sz], 0.035, col, mat);
-        mesh.add_box(
-            [*x, *h + 0.035, *z],
-            [*sx * 0.94, 0.07, *sz * 0.94],
-            [0.035, 0.032, 0.030],
-            MAT_ROOF_TAR,
-        );
-        add_rooftop_kit(mesh, *x, *h + 0.08, *z, *sx * 0.86, *sz * 0.86, i as i32);
-        let bays = 3 + (i as i32 % 3);
-        for b in 0..bays {
-            for f in 0..2 {
-                if (i as i32 + b + f) % 3 == 0 {
-                    add_panel_window(
-                        mesh,
-                        [
-                            *x - *sx * 0.34 + b as f32 * *sx * 0.22,
-                            base + f as f32 * 0.75,
-                            *z + *sz * 0.51,
-                        ],
-                        [0.28, 0.24, 0.035],
-                        (i + b as usize) % 4 == 0,
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn build_midground_blocks(mesh: &mut Mesh) {
-    let kinds = [
-        FacadeKind::OldApartment,
-        FacadeKind::MixedUse,
-        FacadeKind::GlassOffice,
-        FacadeKind::LowShop,
-        FacadeKind::Corner,
-        FacadeKind::Tower,
-    ];
-    for row in 0..5 {
-        for col in 0..9 {
-            let seed = row * 37 + col * 19;
-            let x = -21.0 + col as f32 * 5.2 + ((seed % 5) as f32 - 2.0) * 0.45;
-            let z = -8.0 - row as f32 * 7.2 + ((seed % 7) as f32 - 3.0) * 0.35;
-            let sx = 2.5 + (seed % 4) as f32 * 0.55;
-            let sz = 2.3 + ((seed / 3) % 4) as f32 * 0.50;
-            let h = 2.6 + (seed % 9) as f32 * 0.70 + if col % 5 == 0 { 2.8 } else { 0.0 };
-            build_building(
-                mesh,
-                [x, 0.0, z],
-                [sx, h, sz],
-                kinds[(seed as usize) % kinds.len()],
-                seed as i32,
-            );
-            mesh.add_box(
-                [x, h + 0.04, z],
-                [sx * 0.86, 0.06, sz * 0.86],
-                [0.04, 0.038, 0.035],
-                MAT_ROOF_TAR,
-            );
-            if row < 3 {
-                add_rooftop_kit(mesh, x, h + 0.05, z, sx * 0.72, sz * 0.72, seed as i32);
-            }
-        }
-    }
-    for i in 0..11 {
-        let x = -24.0 + i as f32 * 4.8;
-        mesh.add_box(
-            [x, 0.015, -20.0 - (i % 3) as f32 * 5.5],
-            [3.0, 0.03, 18.0],
-            [0.018, 0.018, 0.017],
-            MAT_ASPHALT,
-        );
-    }
-}
-
-fn build_background_skyline(mesh: &mut Mesh) {
-    for i in 0..44 {
-        let x = -44.0 + i as f32 * 2.05;
-        let h = 5.5
-            + ((i * 13) % 17) as f32 * 0.75
-            + if i == 34 {
-                13.0
-            } else if i == 22 {
-                7.0
-            } else {
-                0.0
-            };
-        let w = 1.0 + ((i * 7) % 5) as f32 * 0.28;
-        let z = -56.0 - ((i * 5) % 9) as f32 * 1.5;
-        let mat = if i % 4 == 0 {
-            MAT_CURTAIN_WALL
-        } else {
-            MAT_CONCRETE
-        };
-        let col = if mat == MAT_CURTAIN_WALL {
-            [0.035, 0.060, 0.085]
-        } else {
-            [0.12, 0.10, 0.095]
-        };
-        mesh.add_box([x, h * 0.5, z], [w, h, 1.1], col, mat);
-        if i == 34 {
-            mesh.add_prism(
-                [x, h + 2.2, z],
-                0.05,
-                4.2,
-                8,
-                [0.75, 0.50, 0.25],
-                MAT_EMISSIVE_WINDOW,
-            );
-        }
-        if i == 22 {
-            mesh.add_beveled_box(
-                [x, h + 0.9, z],
-                [w * 0.55, 1.8, 0.7],
-                0.02,
-                [0.08, 0.08, 0.09],
-                MAT_METAL,
-            );
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn build_hero_street_mesh() -> Mesh {
-    let mut mesh = Mesh::new();
-    mesh.add_box(
-        [0.0, -0.08, 0.0],
-        [42.0, 0.16, 46.0],
-        [0.08, 0.09, 0.09],
-        MAT_CONCRETE,
-    );
-    mesh.add_box(
-        [0.0, 0.01, 0.0],
-        [4.2, 0.05, 42.0],
-        [0.018, 0.018, 0.017],
-        MAT_ASPHALT,
-    );
-    for x in [-1.05, 1.05] {
-        mesh.add_box(
-            [x, 0.055, 0.0],
-            [0.08, 0.035, 38.0],
-            [0.82, 0.72, 0.50],
-            MAT_MARKING,
-        );
-    }
-    for z in (-18..=18).step_by(4) {
-        mesh.add_box(
-            [0.0, 0.06, z as f32],
-            [0.14, 0.035, 1.35],
-            [0.85, 0.76, 0.55],
-            MAT_MARKING,
-        );
-    }
-    for z in [-12.0, 0.0, 12.0] {
-        mesh.add_box(
-            [0.0, 0.07, z],
-            [4.4, 0.04, 0.12],
-            [0.90, 0.86, 0.76],
-            MAT_MARKING,
-        );
-        mesh.add_box(
-            [0.0, 0.01, z],
-            [38.0, 0.04, 1.7],
-            [0.019, 0.019, 0.018],
-            MAT_ASPHALT,
-        );
-    }
-    for x in [-3.0, 3.0] {
-        mesh.add_beveled_box(
-            [x, 0.04, 0.0],
-            [1.15, 0.08, 42.0],
-            0.025,
-            [0.24, 0.23, 0.21],
-            MAT_CONCRETE,
-        );
-    }
-
-    let kinds = [
-        FacadeKind::OldApartment,
-        FacadeKind::GlassOffice,
-        FacadeKind::MixedUse,
-        FacadeKind::LowShop,
-        FacadeKind::Corner,
-        FacadeKind::Tower,
-    ];
-    for side in [-1.0, 1.0] {
-        for i in 0..12 {
-            let z = -18.0 + i as f32 * 3.3;
-            let near = 1.0 - (z.abs() / 22.0).min(0.75);
-            let h =
-                2.2 + ((i * 7 + if side > 0.0 { 3 } else { 9 }) % 10) as f32 * 0.72 + near * 3.3;
-            let w = 1.7 + (i % 3) as f32 * 0.32;
-            let d = 1.8 + ((i + 1) % 3) as f32 * 0.28;
-            let x = side * (4.15 + d * 0.5);
-            build_building(
-                &mut mesh,
-                [x, 0.0, z],
-                [w, h, d],
-                kinds[(i as usize + if side > 0.0 { 0 } else { 2 }) % kinds.len()],
-                i as i32 + if side > 0.0 { 10 } else { 40 },
-            );
-        }
-    }
-    for x in [-14.0, -10.0, -7.0, 7.0, 11.0, 15.0] {
-        for z in [-14.0, -8.0, 6.0, 13.0] {
-            let seed = (x as i32 * 13 + z as i32 * 7).abs();
-            let h = 2.4 + (seed % 8) as f32 * 0.65;
-            build_building(
-                &mut mesh,
-                [x, 0.0, z],
-                [2.2, h, 2.0],
-                kinds[seed as usize % kinds.len()],
-                seed,
-            );
-        }
-    }
-
-    // Far end: a T-intersection, dense LOD blocks, and a lit tower anchor stop the street from falling into sky.
-    mesh.add_box(
-        [0.0, 0.025, -22.2],
-        [22.0, 0.045, 2.2],
-        [0.020, 0.020, 0.019],
-        MAT_ASPHALT,
-    );
-    mesh.add_box(
-        [0.0, 0.071, -21.3],
-        [4.1, 0.035, 0.12],
-        [0.88, 0.82, 0.66],
-        MAT_MARKING,
-    );
-    for x in [-9.0, -6.6, -4.2, 4.8, 7.4, 10.2] {
-        let seed = (x as i32 * 31).abs();
-        build_building(
-            &mut mesh,
-            [x, 0.0, -24.0],
-            [1.9, 3.0 + (seed % 5) as f32 * 0.55, 1.6],
-            kinds[seed as usize % kinds.len()],
-            seed,
-        );
-    }
-    build_tower(&mut mesh, [2.8, 0.0, -27.0], [2.8, 11.0, 2.4], 777);
-    for z in (-16..=18).step_by(4) {
-        build_streetlight(&mut mesh, -2.35, z as f32);
-        build_streetlight(&mut mesh, 2.35, z as f32 + 1.4);
-    }
-    // Simple cars and tree masses for scale; not a traffic system.
-    for (x, z, c) in [
-        (-0.8, -8.0, [0.08, 0.10, 0.12]),
-        (0.9, -3.0, [0.55, 0.08, 0.05]),
-        (-0.7, 4.0, [0.12, 0.18, 0.30]),
-        (0.8, 10.0, [0.75, 0.72, 0.60]),
-    ] {
-        mesh.add_beveled_box([x, 0.20, z], [0.58, 0.28, 1.05], 0.06, c, MAT_METAL);
-        mesh.add_box(
-            [x, 0.43, z - 0.05],
-            [0.42, 0.22, 0.52],
-            [0.04, 0.06, 0.08],
-            MAT_WINDOW_PANE,
-        );
-        for wx in [-0.34, 0.34] {
-            for wz in [-0.34, 0.34] {
-                mesh.add_prism(
-                    [x + wx, 0.12, z + wz],
-                    0.105,
-                    0.055,
-                    8,
-                    [0.01, 0.01, 0.012],
-                    MAT_METAL,
-                );
-            }
-        }
-    }
-
-    // Reusable street-life kit: drainage, curb ramps, repair patches, transit furniture, utilities, and overhead cables.
-    for z in [-13.0, -5.0, 7.0, 15.0] {
-        mesh.add_box(
-            [-2.05, 0.085, z],
-            [0.34, 0.025, 0.18],
-            [0.035, 0.037, 0.036],
-            MAT_METAL,
-        ); // drainage grate
-        mesh.add_box(
-            [2.05, 0.086, z + 1.2],
-            [0.48, 0.024, 0.32],
-            [0.045, 0.045, 0.043],
-            MAT_ASPHALT,
-        ); // patch
-    }
-    for (x, z) in [(-2.95, -12.0), (2.95, 0.0), (-2.95, 12.0)] {
-        mesh.add_box(
-            [x, 0.09, z],
-            [0.85, 0.035, 0.55],
-            [0.30, 0.28, 0.24],
-            MAT_CONCRETE,
-        ); // curb ramp
-        mesh.add_prism(
-            [x * 0.62, 0.09, z + 0.6],
-            0.18,
-            0.035,
-            18,
-            [0.055, 0.052, 0.048],
-            MAT_METAL,
-        ); // manhole cover
-    }
-    mesh.add_beveled_box(
-        [-3.35, 0.68, -4.5],
-        [0.12, 1.2, 1.6],
-        0.015,
-        [0.08, 0.12, 0.14],
-        MAT_METAL,
-    ); // bus-stop post
-    mesh.add_box(
-        [-3.25, 1.35, -4.5],
-        [0.10, 0.52, 1.3],
-        [0.025, 0.045, 0.06],
-        MAT_WINDOW_PANE,
-    ); // bus-stop glass
-    mesh.add_box(
-        [3.42, 0.36, 3.0],
-        [0.36, 0.62, 0.28],
-        [0.04, 0.13, 0.10],
-        MAT_METAL,
-    ); // utility box
-    mesh.add_box(
-        [-3.35, 0.34, 6.4],
-        [0.28, 0.48, 0.28],
-        [0.08, 0.09, 0.10],
-        MAT_METAL,
-    ); // trash can
-    mesh.add_box(
-        [3.28, 0.42, -9.5],
-        [0.24, 0.66, 0.24],
-        [0.02, 0.07, 0.16],
-        MAT_METAL,
-    ); // mailbox
-    mesh.add_box(
-        [0.0, 2.55, -2.0],
-        [6.2, 0.025, 0.025],
-        [0.03, 0.025, 0.022],
-        MAT_METAL,
-    ); // overhead cable
-    mesh.add_box(
-        [0.0, 2.35, 8.5],
-        [5.8, 0.022, 0.022],
-        [0.03, 0.025, 0.022],
-        MAT_METAL,
-    ); // overhead cable
-    for x in [-3.35, 3.35] {
-        for z in (-18..=18).step_by(6) {
-            mesh.add_prism(
-                [x, 0.32, z as f32],
-                0.055,
-                0.64,
-                7,
-                [0.18, 0.10, 0.05],
-                MAT_BRICK,
-            );
-            mesh.add_box(
-                [x, 0.86, z as f32],
-                [0.72, 0.58, 0.035],
-                [0.07, 0.22, 0.10],
-                MAT_FOLIAGE,
-            );
-            mesh.add_box(
-                [x, 0.92, z as f32],
-                [0.035, 0.62, 0.72],
-                [0.05, 0.18, 0.08],
-                MAT_FOLIAGE,
-            );
-        }
-    }
-    mesh
-}
-
-fn build_rooftop_vista_mesh() -> Mesh {
-    let mut mesh = Mesh::new();
-    mesh.add_box(
-        [0.0, -0.08, -18.0],
-        [86.0, 0.16, 110.0],
-        [0.055, 0.055, 0.052],
-        MAT_CONCRETE,
-    );
-    build_rooftop_foreground(&mut mesh);
-    build_midground_blocks(&mut mesh);
-    build_background_skyline(&mut mesh);
-    mesh
-}
-
-fn build_city_mesh() -> Mesh {
-    match option_env!("WEBGPU_CITY_CAMERA") {
-        Some("hero") | Some("street") => build_hero_street_mesh(),
-        _ => build_rooftop_vista_mesh(),
-    }
+async fn build_city_mesh() -> Mesh {
+    load_city_gltf_mesh().await
 }
 
 #[derive(Default)]
@@ -2313,14 +1526,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn city_mesh_stats_are_bounded() {
-        let mesh = build_city_mesh();
-        eprintln!(
-            "city test stats: vertices={} indices={} draw_calls=4",
-            mesh.vertices.len(),
-            mesh.indices.len()
-        );
-        assert!(mesh.vertices.len() < 120_000);
-        assert!(mesh.indices.len() < 180_000);
+    fn gltf_material_names_map_to_shader_materials() {
+        assert_eq!(gltf_material("asphalt").1, MAT_ASPHALT);
+        assert_eq!(gltf_material("curtain_wall").1, MAT_CURTAIN_WALL);
+        assert_eq!(gltf_material("emissive_window").1, MAT_EMISSIVE_WINDOW);
+        assert_eq!(gltf_material("unknown").1, MAT_CONCRETE);
     }
 }

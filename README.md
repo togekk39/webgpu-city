@@ -1,13 +1,14 @@
 # webgpu-city
 
-`webgpu-city` 是一個以 Rust、wgpu、winit 與 WebAssembly 撰寫的 Web 版 3D 城市展示程式。程式會產生簡易城市網格、道路與建築物，並在瀏覽器的 WebGPU canvas 中持續旋轉相機呈現畫面。
+`webgpu-city` 是一個以 Rust、wgpu、winit 與 WebAssembly 撰寫的 3D 城市展示程式。程式保留夕陽天空、陰影與後製效果，城市場景則改由外部 glTF / GLB 模型提供。
 
 ## 功能特色
 
 - 使用 `wgpu` 建立 WebGPU render pipeline。
 - 使用 `winit` 在 Web 平台建立並掛載 `<canvas>`。
-- 以程式化方式產生城市幾何、道路與高樓。
-- 使用 WGSL shader 呈現高度 glow、街道路面與距離霧化效果。
+- 從 `WEBGPU_CITY_GLTF_URL` 指定的 glTF / GLB 下載連結或本機路徑載入城市 mesh（原生執行）。
+- 支援 GLB 內嵌 PNG base-color 材質貼圖，並沿用現有夕陽場景的材質與光照流程。
+- 使用 WGSL shader 呈現夕陽天空、陰影、glow、街道路面與距離霧化效果。
 
 ## 專案結構
 
@@ -19,7 +20,7 @@
 ├── index.html          # Web 入口頁面，供 Trunk 載入 wasm
 ├── README.md
 └── src
-    ├── main.rs         # Web 應用程式、wgpu 初始化與城市 mesh 產生
+    ├── main.rs         # 應用程式、wgpu 初始化與 glTF / GLB 城市場景載入
     └── shader.wgsl     # WGSL vertex/fragment shader
 ```
 
@@ -36,6 +37,42 @@
 rustup target add wasm32-unknown-unknown
 cargo install trunk
 ```
+
+## 城市模型下載設定（`WEBGPU_CITY_GLTF_URL`）
+
+城市模型不再內建於 repo。原生執行時，啟動前必須用 `WEBGPU_CITY_GLTF_URL` 指定模型來源；此值可以是 HTTP(S) 下載連結，也可以是本機檔案路徑：
+
+```bash
+# 從下載連結載入 GLB / glTF
+WEBGPU_CITY_GLTF_URL=https://example.com/models/city.glb cargo run
+
+# 或從本機檔案載入
+WEBGPU_CITY_GLTF_URL=./models/city.glb cargo run
+```
+
+也可以在 repo 根目錄建立 `.env`，讓原生執行與 Trunk / wasm 建置時自動帶入同一個模型來源：
+
+```dotenv
+WEBGPU_CITY_GLTF_URL=https://example.com/models/city.glb
+```
+
+```bash
+cargo run
+trunk serve --open
+```
+
+WebAssembly / Trunk 執行時沒有 runtime 環境變數；請在 `.env` 或建置環境提供 `WEBGPU_CITY_GLTF_URL`，或在頁面 URL 上加上 `city` / `city_gltf_url` query 參數：
+
+```bash
+WEBGPU_CITY_GLTF_URL=https://example.com/models/city.glb trunk serve --open
+
+# 或啟動後開啟類似：
+# http://127.0.0.1:3000/?city=https%3A%2F%2Fexample.com%2Fmodels%2Fcity.glb
+```
+
+若使用 `WEBGPU_CITY_GLTF_URL=assets/city.glb` 搭配 Trunk，`index.html` 會透過 `data-trunk` copy-dir 將本機 `assets/` 目錄複製到輸出目錄；請確認本機存在 `assets/city.glb`，否則瀏覽器可能抓到 HTML fallback 而不是 GLB。
+
+目前載入器預期模型的 geometry buffer 內嵌在 GLB binary buffer 中；PNG 材質支援 GLB 內嵌的 `image/png` base-color texture、glTF/GLB 內的 `data:image/png;base64,...` URI，以及相對於模型檔案位置的外部 `.png` URI（例如 `assets/city.glb` 旁邊的 `assets/textures/albedo.png`）。若模型使用材質名稱，程式會將常見名稱（例如 `asphalt`、`brick`、`curtain_wall`、`emissive_window`、`metal`、`roof_tar`、`solar`）映射到既有 shader 材質效果；未知材質名稱會以 concrete 材質處理。
 
 ## Web 版執行
 
