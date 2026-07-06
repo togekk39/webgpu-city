@@ -2902,6 +2902,7 @@ dependencies = [
 name = "webgpu-city"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "bytemuck",
  "cgmath",
  "console_error_panic_hook",

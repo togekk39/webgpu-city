@@ -72,7 +72,7 @@ WEBGPU_CITY_GLTF_URL=https://example.com/models/city.glb trunk serve --open
 
 若使用 `WEBGPU_CITY_GLTF_URL=assets/city.glb` 搭配 Trunk，`index.html` 會透過 `data-trunk` copy-dir 將本機 `assets/` 目錄複製到輸出目錄；請確認本機存在 `assets/city.glb`，否則瀏覽器可能抓到 HTML fallback 而不是 GLB。
 
-目前載入器預期模型的 geometry buffer 內嵌在 GLB binary buffer 中；PNG 材質支援 GLB 內嵌的 `image/png` base-color texture。若模型使用材質名稱，程式會將常見名稱（例如 `asphalt`、`brick`、`curtain_wall`、`emissive_window`、`metal`、`roof_tar`、`solar`）映射到既有 shader 材質效果；未知材質名稱會以 concrete 材質處理。
+目前載入器預期模型的 geometry buffer 內嵌在 GLB binary buffer 中；PNG 材質支援 GLB 內嵌的 `image/png` base-color texture、glTF/GLB 內的 `data:image/png;base64,...` URI，以及相對於模型檔案位置的外部 `.png` URI（例如 `assets/city.glb` 旁邊的 `assets/textures/albedo.png`）。若模型使用材質名稱，程式會將常見名稱（例如 `asphalt`、`brick`、`curtain_wall`、`emissive_window`、`metal`、`roof_tar`、`solar`）映射到既有 shader 材質效果；未知材質名稱會以 concrete 材質處理。
 
 ## Web 版執行
 

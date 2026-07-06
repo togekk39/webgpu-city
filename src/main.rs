@@ -1,3 +1,4 @@
+use base64::Engine;
 use cgmath::{Deg, InnerSpace, Matrix4, Point3, SquareMatrix, Vector3, ortho, perspective};
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
@@ -181,8 +182,13 @@ impl MaterialTexture {
     }
 }
 
+struct GltfAsset {
+    bytes: Vec<u8>,
+    source: String,
+}
+
 #[cfg(not(target_arch = "wasm32"))]
-async fn download_city_gltf_bytes() -> Vec<u8> {
+async fn download_city_gltf_asset() -> GltfAsset {
     let source = std::env::var(CITY_URL_ENV)
         .ok()
         .or_else(dotenv_city_gltf_source)
@@ -191,14 +197,16 @@ async fn download_city_gltf_bytes() -> Vec<u8> {
 
     if source.starts_with("http://") || source.starts_with("https://") {
         let response = reqwest::blocking::get(&source).expect("download city glTF/GLB");
-        response
+        let bytes = response
             .error_for_status()
             .expect("city glTF/GLB download returned an error status")
             .bytes()
             .expect("read city glTF/GLB download body")
-            .to_vec()
+            .to_vec();
+        GltfAsset { bytes, source }
     } else {
-        std::fs::read(&source).expect("read city glTF/GLB file path")
+        let bytes = std::fs::read(&source).expect("read city glTF/GLB file path");
+        GltfAsset { bytes, source }
     }
 }
 
@@ -220,7 +228,7 @@ fn dotenv_city_gltf_source() -> Option<String> {
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn download_city_gltf_bytes() -> Vec<u8> {
+async fn download_city_gltf_asset() -> GltfAsset {
     let source = wasm_city_gltf_source()
         .expect("set WEBGPU_CITY_GLTF_URL at build time or add ?city=<glb-url> to the page URL");
     let window = web_sys::window().expect("browser window");
@@ -244,7 +252,10 @@ async fn download_city_gltf_bytes() -> Vec<u8> {
     .await
     .expect("read city glTF/GLB download body");
 
-    js_sys::Uint8Array::new(&array_buffer).to_vec()
+    GltfAsset {
+        bytes: js_sys::Uint8Array::new(&array_buffer).to_vec(),
+        source,
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -264,7 +275,7 @@ fn wasm_city_gltf_source() -> Option<String> {
     None
 }
 
-fn decode_embedded_png_texture(bytes: &[u8]) -> Option<MaterialTexture> {
+fn decode_png_texture(bytes: &[u8]) -> Option<MaterialTexture> {
     let image = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
         .ok()?
         .to_rgba8();
@@ -276,32 +287,113 @@ fn decode_embedded_png_texture(bytes: &[u8]) -> Option<MaterialTexture> {
     })
 }
 
-fn embedded_image_bytes<'a>(image: gltf::image::Image<'a>, blob: &'a [u8]) -> Option<&'a [u8]> {
+fn decode_data_uri(uri: &str) -> Option<Vec<u8>> {
+    let (metadata, data) = uri.split_once(',')?;
+    if !metadata.starts_with("data:") || !metadata.ends_with(";base64") {
+        return None;
+    }
+    base64::engine::general_purpose::STANDARD.decode(data).ok()
+}
+
+fn resolve_relative_uri(base: &str, uri: &str) -> String {
+    if uri.starts_with("http://") || uri.starts_with("https://") || uri.starts_with("data:") {
+        return uri.to_owned();
+    }
+
+    if base.starts_with("http://") || base.starts_with("https://") {
+        let prefix = base
+            .rsplit_once('/')
+            .map(|(prefix, _)| prefix)
+            .unwrap_or(base);
+        format!("{prefix}/{uri}")
+    } else {
+        std::path::Path::new(base)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(uri)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn external_resource_bytes(uri: &str) -> Option<Vec<u8>> {
+    if let Some(bytes) = decode_data_uri(uri) {
+        return Some(bytes);
+    }
+    if uri.starts_with("http://") || uri.starts_with("https://") {
+        reqwest::blocking::get(uri)
+            .ok()?
+            .error_for_status()
+            .ok()?
+            .bytes()
+            .ok()
+            .map(|bytes| bytes.to_vec())
+    } else {
+        std::fs::read(uri).ok()
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+async fn external_resource_bytes(uri: &str) -> Option<Vec<u8>> {
+    if let Some(bytes) = decode_data_uri(uri) {
+        return Some(bytes);
+    }
+    let window = web_sys::window()?;
+    let response_value = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(uri))
+        .await
+        .ok()?;
+    let response: web_sys::Response = response_value.dyn_into().ok()?;
+    if !response.ok() {
+        return None;
+    }
+    let array_buffer = wasm_bindgen_futures::JsFuture::from(response.array_buffer().ok()?)
+        .await
+        .ok()?;
+    Some(js_sys::Uint8Array::new(&array_buffer).to_vec())
+}
+
+async fn load_gltf_image_texture(
+    image: gltf::image::Image<'_>,
+    blob: &[u8],
+    asset_source: &str,
+) -> Option<MaterialTexture> {
     match image.source() {
         gltf::image::Source::View { view, mime_type } if mime_type == "image/png" => {
             let start = view.offset();
             let end = start + view.length();
-            blob.get(start..end)
+            blob.get(start..end).and_then(decode_png_texture)
+        }
+        gltf::image::Source::Uri { uri, mime_type }
+            if mime_type == Some("image/png")
+                || uri.ends_with(".png")
+                || uri.starts_with("data:image/png") =>
+        {
+            let uri = resolve_relative_uri(asset_source, uri);
+            external_resource_bytes(&uri)
+                .await
+                .as_deref()
+                .and_then(decode_png_texture)
         }
         _ => None,
     }
 }
 
 async fn load_city_gltf_mesh() -> Mesh {
-    let bytes = download_city_gltf_bytes().await;
-    load_city_gltf_mesh_from_slice(&bytes)
+    let asset = download_city_gltf_asset().await;
+    load_city_gltf_mesh_from_slice(&asset.bytes, &asset.source).await
 }
 
-fn load_city_gltf_mesh_from_slice(bytes: &[u8]) -> Mesh {
+async fn load_city_gltf_mesh_from_slice(bytes: &[u8], asset_source: &str) -> Mesh {
     let gltf = gltf::Gltf::from_slice(bytes).expect("parse downloaded city glTF/GLB");
     let blob = gltf
         .blob
         .as_deref()
         .expect("downloaded city GLB must contain an embedded binary buffer");
-    let images: Vec<Option<MaterialTexture>> = gltf
-        .images()
-        .map(|image| embedded_image_bytes(image, blob).and_then(decode_embedded_png_texture))
-        .collect();
+    let mut images: Vec<Option<MaterialTexture>> = Vec::new();
+    for image in gltf.images() {
+        images.push(load_gltf_image_texture(image, blob, asset_source).await);
+    }
     let mut mesh = Mesh::new();
 
     for gltf_mesh in gltf.meshes() {
