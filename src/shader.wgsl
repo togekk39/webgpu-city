@@ -20,6 +20,11 @@ var shadow_map: texture_depth_2d;
 @group(1) @binding(1)
 var shadow_sampler: sampler_comparison;
 
+struct MaterialUniform {
+    fallback_color: vec4<f32>,
+    material: vec4<f32>,
+};
+
 @group(3) @binding(0)
 var<uniform> material_uniform: MaterialUniform;
 @group(3) @binding(1)
@@ -30,11 +35,6 @@ var material_sampler: sampler;
 var normal_texture: texture_2d<f32>;
 @group(3) @binding(4)
 var emissive_texture: texture_2d<f32>;
-
-struct MaterialUniform {
-    fallback_color: vec4<f32>,
-    material: vec4<f32>,
-};
 
 @group(2) @binding(0)
 var hdr_scene: texture_2d<f32>;
